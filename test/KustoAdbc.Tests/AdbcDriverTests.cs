@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Apache.Arrow.Adbc;
+using KustoAdbc.Substrait;
 using Xunit;
 
 namespace KustoAdbc.Tests
@@ -214,6 +215,18 @@ namespace KustoAdbc.Tests
 
             // No query or plan set — should throw
             Assert.Throws<AdbcException>(() => stmt.ExecuteQuery());
+        }
+
+        [Fact]
+        public void Capabilities_YamlIsAccessible()
+        {
+            string yaml = KustoCapabilities.GetCapabilityYaml();
+            Assert.NotEmpty(yaml);
+            Assert.Contains("scalar_functions:", yaml);
+            Assert.Contains("aggregate_functions:", yaml);
+            Assert.Contains("name: \"add\"", yaml);
+            Assert.Contains("name: \"count\"", yaml);
+            Assert.Contains("name: \"char_length\"", yaml);
         }
     }
 }

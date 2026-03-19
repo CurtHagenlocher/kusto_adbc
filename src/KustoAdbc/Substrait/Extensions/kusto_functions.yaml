@@ -1,0 +1,546 @@
+# Kusto ADBC Driver — Supported Substrait Functions
+#
+# This file declares which standard Substrait functions this driver
+# can translate to KQL. Plan producers should reference only these
+# functions when targeting the Kusto ADBC consumer.
+#
+# Format follows the Substrait simple_extensions YAML schema.
+# Each section references the standard Substrait extension URN
+# and lists the supported implementations with their type signatures.
+#
+# Kusto type mapping:
+#   i32, i64        → int, long
+#   fp32, fp64      → real
+#   string          → string
+#   boolean         → bool
+#   timestamp       → datetime
+#   date            → datetime
+#   any             → any type (polymorphic)
+
+%YAML 1.2
+---
+
+# ═══════════════════════════════════════════════════════════════════
+# Arithmetic — extension:io.substrait:functions_arithmetic
+# ═══════════════════════════════════════════════════════════════════
+
+scalar_functions:
+
+  # ── add → KQL: arg0 + arg1 ──────────────────────────────────────
+  - name: "add"
+    description: "Add two values. Mapped to KQL infix `+` operator."
+    impls:
+      - args: [{name: x, value: i32}, {name: y, value: i32}]
+        options: {overflow: {values: [SILENT, SATURATE, ERROR]}}
+        return: i32
+      - args: [{name: x, value: i64}, {name: y, value: i64}]
+        options: {overflow: {values: [SILENT, SATURATE, ERROR]}}
+        return: i64
+      - args: [{name: x, value: fp32}, {name: y, value: fp32}]
+        return: fp32
+      - args: [{name: x, value: fp64}, {name: y, value: fp64}]
+        return: fp64
+
+  # ── subtract → KQL: arg0 - arg1 ────────────────────────────────
+  - name: "subtract"
+    description: "Subtract one value from another. Mapped to KQL infix `-` operator."
+    impls:
+      - args: [{name: x, value: i32}, {name: y, value: i32}]
+        options: {overflow: {values: [SILENT, SATURATE, ERROR]}}
+        return: i32
+      - args: [{name: x, value: i64}, {name: y, value: i64}]
+        options: {overflow: {values: [SILENT, SATURATE, ERROR]}}
+        return: i64
+      - args: [{name: x, value: fp32}, {name: y, value: fp32}]
+        return: fp32
+      - args: [{name: x, value: fp64}, {name: y, value: fp64}]
+        return: fp64
+
+  # ── multiply → KQL: arg0 * arg1 ────────────────────────────────
+  - name: "multiply"
+    description: "Multiply two values. Mapped to KQL infix `*` operator."
+    impls:
+      - args: [{name: x, value: i32}, {name: y, value: i32}]
+        options: {overflow: {values: [SILENT, SATURATE, ERROR]}}
+        return: i32
+      - args: [{name: x, value: i64}, {name: y, value: i64}]
+        options: {overflow: {values: [SILENT, SATURATE, ERROR]}}
+        return: i64
+      - args: [{name: x, value: fp32}, {name: y, value: fp32}]
+        return: fp32
+      - args: [{name: x, value: fp64}, {name: y, value: fp64}]
+        return: fp64
+
+  # ── divide → KQL: arg0 / arg1 ──────────────────────────────────
+  - name: "divide"
+    description: "Divide one value by another. Mapped to KQL infix `/` operator."
+    impls:
+      - args: [{name: x, value: i32}, {name: y, value: i32}]
+        options: {overflow: {values: [SILENT, SATURATE, ERROR]}}
+        return: i32
+      - args: [{name: x, value: i64}, {name: y, value: i64}]
+        options: {overflow: {values: [SILENT, SATURATE, ERROR]}}
+        return: i64
+      - args: [{name: x, value: fp32}, {name: y, value: fp32}]
+        return: fp32
+      - args: [{name: x, value: fp64}, {name: y, value: fp64}]
+        return: fp64
+
+  # ── modulus → KQL: arg0 % arg1 ─────────────────────────────────
+  - name: "modulus"
+    description: "Remainder of integer division. Mapped to KQL infix `%` operator."
+    impls:
+      - args: [{name: x, value: i32}, {name: y, value: i32}]
+        return: i32
+      - args: [{name: x, value: i64}, {name: y, value: i64}]
+        return: i64
+
+  # ── negate → KQL: -(arg0) ──────────────────────────────────────
+  - name: "negate"
+    description: "Negate a numeric value. Mapped to KQL unary `-` operator."
+    impls:
+      - args: [{name: x, value: i32}]
+        return: i32
+      - args: [{name: x, value: i64}]
+        return: i64
+      - args: [{name: x, value: fp32}]
+        return: fp32
+      - args: [{name: x, value: fp64}]
+        return: fp64
+
+  # ── abs → KQL: abs(arg0) ───────────────────────────────────────
+  - name: "abs"
+    description: "Absolute value. Mapped to KQL `abs()` function."
+    impls:
+      - args: [{name: x, value: i32}]
+        return: i32
+      - args: [{name: x, value: i64}]
+        return: i64
+      - args: [{name: x, value: fp32}]
+        return: fp32
+      - args: [{name: x, value: fp64}]
+        return: fp64
+
+  # ── sign → KQL: sign(arg0) ─────────────────────────────────────
+  - name: "sign"
+    description: "Sign of a value (-1, 0, 1). Mapped to KQL `sign()` function."
+    impls:
+      - args: [{name: x, value: i32}]
+        return: i32
+      - args: [{name: x, value: i64}]
+        return: i64
+      - args: [{name: x, value: fp64}]
+        return: fp64
+
+  # ── power → KQL: pow(base, exp) ────────────────────────────────
+  - name: "power"
+    description: "Raise a value to a power. Mapped to KQL `pow()` function."
+    impls:
+      - args: [{name: base, value: fp64}, {name: exp, value: fp64}]
+        return: fp64
+
+  # ── sqrt → KQL: sqrt(arg0) ─────────────────────────────────────
+  - name: "sqrt"
+    description: "Square root. Mapped to KQL `sqrt()` function."
+    impls:
+      - args: [{name: x, value: fp64}]
+        return: fp64
+
+  # ── exp → KQL: exp(arg0) ───────────────────────────────────────
+  - name: "exp"
+    description: "e raised to a power. Mapped to KQL `exp()` function."
+    impls:
+      - args: [{name: x, value: fp64}]
+        return: fp64
+
+  # ── ln → KQL: log(arg0) ────────────────────────────────────────
+  - name: "ln"
+    description: "Natural logarithm. Mapped to KQL `log()` function."
+    impls:
+      - args: [{name: x, value: fp64}]
+        return: fp64
+
+  # ── log10 → KQL: log10(arg0) ───────────────────────────────────
+  - name: "log10"
+    description: "Base-10 logarithm. Mapped to KQL `log10()` function."
+    impls:
+      - args: [{name: x, value: fp64}]
+        return: fp64
+
+  # ── log2 → KQL: log2(arg0) ─────────────────────────────────────
+  - name: "log2"
+    description: "Base-2 logarithm. Mapped to KQL `log2()` function."
+    impls:
+      - args: [{name: x, value: fp64}]
+        return: fp64
+
+  # ── ceil → KQL: ceiling(arg0) ──────────────────────────────────
+  - name: "ceil"
+    description: "Round up to nearest integer. Mapped to KQL `ceiling()` function."
+    impls:
+      - args: [{name: x, value: fp64}]
+        return: i64
+
+  # ── floor → KQL: floor(arg0) ───────────────────────────────────
+  - name: "floor"
+    description: "Round down to nearest integer. Mapped to KQL `floor()` function."
+    impls:
+      - args: [{name: x, value: fp64}]
+        return: i64
+
+  # ── round → KQL: round(arg0) ───────────────────────────────────
+  - name: "round"
+    description: "Round to nearest integer. Mapped to KQL `round()` function."
+    impls:
+      - args: [{name: x, value: fp64}]
+        return: fp64
+      - args: [{name: x, value: fp64}, {name: precision, value: i32}]
+        return: fp64
+
+# ═══════════════════════════════════════════════════════════════════
+# Comparison — extension:io.substrait:functions_comparison
+# ═══════════════════════════════════════════════════════════════════
+
+  # ── equal → KQL: arg0 == arg1 ──────────────────────────────────
+  - name: "equal"
+    description: "Equality comparison. Mapped to KQL `==` operator."
+    impls:
+      - args: [{name: x, value: any}, {name: y, value: any}]
+        return: boolean
+
+  # ── not_equal → KQL: arg0 != arg1 ──────────────────────────────
+  - name: "not_equal"
+    description: "Inequality comparison. Mapped to KQL `!=` operator."
+    impls:
+      - args: [{name: x, value: any}, {name: y, value: any}]
+        return: boolean
+
+  # ── lt → KQL: arg0 < arg1 ──────────────────────────────────────
+  - name: "lt"
+    description: "Less than. Mapped to KQL `<` operator."
+    impls:
+      - args: [{name: x, value: any}, {name: y, value: any}]
+        return: boolean
+
+  # ── lte → KQL: arg0 <= arg1 ────────────────────────────────────
+  - name: "lte"
+    description: "Less than or equal. Mapped to KQL `<=` operator."
+    impls:
+      - args: [{name: x, value: any}, {name: y, value: any}]
+        return: boolean
+
+  # ── gt → KQL: arg0 > arg1 ──────────────────────────────────────
+  - name: "gt"
+    description: "Greater than. Mapped to KQL `>` operator."
+    impls:
+      - args: [{name: x, value: any}, {name: y, value: any}]
+        return: boolean
+
+  # ── gte → KQL: arg0 >= arg1 ────────────────────────────────────
+  - name: "gte"
+    description: "Greater than or equal. Mapped to KQL `>=` operator."
+    impls:
+      - args: [{name: x, value: any}, {name: y, value: any}]
+        return: boolean
+
+  # ── is_null → KQL: isnull(arg0) ────────────────────────────────
+  - name: "is_null"
+    description: "Test if value is null. Mapped to KQL `isnull()` function."
+    impls:
+      - args: [{name: x, value: any}]
+        return: boolean
+
+  # ── is_not_null → KQL: isnotnull(arg0) ─────────────────────────
+  - name: "is_not_null"
+    description: "Test if value is not null. Mapped to KQL `isnotnull()` function."
+    impls:
+      - args: [{name: x, value: any}]
+        return: boolean
+
+  # ── between → KQL: arg0 between (arg1 .. arg2) ─────────────────
+  - name: "between"
+    description: "Range check. Mapped to KQL `between` operator."
+    impls:
+      - args: [{name: x, value: any}, {name: lo, value: any}, {name: hi, value: any}]
+        return: boolean
+
+  # ── coalesce → KQL: coalesce(args...) ──────────────────────────
+  - name: "coalesce"
+    description: "First non-null argument. Mapped to KQL `coalesce()` function."
+    impls:
+      - args: [{name: x, value: any}]
+        variadic: {min: 2}
+        return: any
+
+  # ── is_nan → KQL: isnan(arg0) ──────────────────────────────────
+  - name: "is_nan"
+    description: "Test if value is NaN. Mapped to KQL `isnan()` function."
+    impls:
+      - args: [{name: x, value: fp32}]
+        return: boolean
+      - args: [{name: x, value: fp64}]
+        return: boolean
+
+  # ── is_finite → KQL: isfinite(arg0) ────────────────────────────
+  - name: "is_finite"
+    description: "Test if value is finite. Mapped to KQL `isfinite()` function."
+    impls:
+      - args: [{name: x, value: fp64}]
+        return: boolean
+
+  # ── is_infinite → KQL: isinf(arg0) ─────────────────────────────
+  - name: "is_infinite"
+    description: "Test if value is infinite. Mapped to KQL `isinf()` function."
+    impls:
+      - args: [{name: x, value: fp64}]
+        return: boolean
+
+  # ── nullif → KQL: iif(arg0 == arg1, null, arg0) ────────────────
+  - name: "nullif"
+    description: "Returns null if arg0 equals arg1, otherwise arg0."
+    impls:
+      - args: [{name: x, value: any}, {name: y, value: any}]
+        return: any
+
+# ═══════════════════════════════════════════════════════════════════
+# Boolean — extension:io.substrait:functions_boolean
+# ═══════════════════════════════════════════════════════════════════
+
+  # ── and → KQL: arg0 and arg1 ───────────────────────────────────
+  - name: "and"
+    description: "Logical AND. Mapped to KQL `and` operator."
+    impls:
+      - args: [{name: x, value: boolean}, {name: y, value: boolean}]
+        return: boolean
+
+  # ── or → KQL: arg0 or arg1 ─────────────────────────────────────
+  - name: "or"
+    description: "Logical OR. Mapped to KQL `or` operator."
+    impls:
+      - args: [{name: x, value: boolean}, {name: y, value: boolean}]
+        return: boolean
+
+  # ── not → KQL: not(arg0) ───────────────────────────────────────
+  - name: "not"
+    description: "Logical NOT. Mapped to KQL `not` operator."
+    impls:
+      - args: [{name: x, value: boolean}]
+        return: boolean
+
+  # ── xor → KQL: arg0 != arg1 (for booleans) ────────────────────
+  - name: "xor"
+    description: "Logical XOR. Mapped to KQL `!=` for boolean operands."
+    impls:
+      - args: [{name: x, value: boolean}, {name: y, value: boolean}]
+        return: boolean
+
+# ═══════════════════════════════════════════════════════════════════
+# String — extension:io.substrait:functions_string
+# ═══════════════════════════════════════════════════════════════════
+
+  # ── concat → KQL: strcat(args...) ──────────────────────────────
+  - name: "concat"
+    description: "Concatenate strings. Mapped to KQL `strcat()` function."
+    impls:
+      - args: [{name: x, value: string}]
+        variadic: {min: 2}
+        return: string
+
+  # ── like → KQL: arg0 matches regex arg1 ────────────────────────
+  - name: "like"
+    description: "SQL LIKE pattern match. Mapped to KQL `matches regex` operator."
+    impls:
+      - args: [{name: x, value: string}, {name: pattern, value: string}]
+        return: boolean
+
+  # ── substring → KQL: substring(arg0, arg1, arg2) ──────────────
+  - name: "substring"
+    description: "Extract substring. Mapped to KQL `substring()` function."
+    impls:
+      - args: [{name: x, value: string}, {name: start, value: i32}, {name: length, value: i32}]
+        return: string
+
+  # ── char_length → KQL: strlen(arg0) ────────────────────────────
+  - name: "char_length"
+    description: "String length in characters. Mapped to KQL `strlen()` function."
+    impls:
+      - args: [{name: x, value: string}]
+        return: i64
+
+  # ── upper → KQL: toupper(arg0) ─────────────────────────────────
+  - name: "upper"
+    description: "Convert to uppercase. Mapped to KQL `toupper()` function."
+    impls:
+      - args: [{name: x, value: string}]
+        return: string
+
+  # ── lower → KQL: tolower(arg0) ─────────────────────────────────
+  - name: "lower"
+    description: "Convert to lowercase. Mapped to KQL `tolower()` function."
+    impls:
+      - args: [{name: x, value: string}]
+        return: string
+
+  # ── trim → KQL: trim(arg0) ─────────────────────────────────────
+  - name: "trim"
+    description: "Remove leading and trailing whitespace. Mapped to KQL `trim()` function."
+    impls:
+      - args: [{name: x, value: string}]
+        return: string
+
+  # ── ltrim → KQL: trim_start(arg0) ──────────────────────────────
+  - name: "ltrim"
+    description: "Remove leading whitespace. Mapped to KQL `trim_start()` function."
+    impls:
+      - args: [{name: x, value: string}]
+        return: string
+
+  # ── rtrim → KQL: trim_end(arg0) ────────────────────────────────
+  - name: "rtrim"
+    description: "Remove trailing whitespace. Mapped to KQL `trim_end()` function."
+    impls:
+      - args: [{name: x, value: string}]
+        return: string
+
+  # ── replace → KQL: replace_string(arg0, arg1, arg2) ───────────
+  - name: "replace"
+    description: "Replace occurrences. Mapped to KQL `replace_string()` function."
+    impls:
+      - args: [{name: x, value: string}, {name: from, value: string}, {name: to, value: string}]
+        return: string
+
+  # ── starts_with → KQL: arg0 startswith arg1 ────────────────────
+  - name: "starts_with"
+    description: "Test if string starts with prefix. Mapped to KQL `startswith` operator."
+    impls:
+      - args: [{name: x, value: string}, {name: prefix, value: string}]
+        return: boolean
+
+  # ── ends_with → KQL: arg0 endswith arg1 ────────────────────────
+  - name: "ends_with"
+    description: "Test if string ends with suffix. Mapped to KQL `endswith` operator."
+    impls:
+      - args: [{name: x, value: string}, {name: suffix, value: string}]
+        return: boolean
+
+  # ── contains → KQL: arg0 contains arg1 ─────────────────────────
+  - name: "contains"
+    description: "Test if string contains substring. Mapped to KQL `contains` operator."
+    impls:
+      - args: [{name: x, value: string}, {name: sub, value: string}]
+        return: boolean
+
+  # ── regexp_match → KQL: arg0 matches regex arg1 ────────────────
+  - name: "regexp_match"
+    description: "Regex match. Mapped to KQL `matches regex` operator."
+    impls:
+      - args: [{name: x, value: string}, {name: pattern, value: string}]
+        return: boolean
+
+# ═══════════════════════════════════════════════════════════════════
+# Aggregate — extension:io.substrait:functions_aggregate_generic
+# ═══════════════════════════════════════════════════════════════════
+
+aggregate_functions:
+
+  # ── count → KQL: count(arg0) ───────────────────────────────────
+  - name: "count"
+    description: "Count non-null values. Mapped to KQL `count()` aggregate."
+    impls:
+      - args: [{name: x, value: any}]
+        nullability: DECLARED_OUTPUT
+        decomposable: MANY
+        intermediate: i64
+        return: i64
+      - nullability: DECLARED_OUTPUT
+        decomposable: MANY
+        intermediate: i64
+        return: i64
+
+  # ── sum → KQL: sum(arg0) ───────────────────────────────────────
+  - name: "sum"
+    description: "Sum of values. Mapped to KQL `sum()` aggregate."
+    impls:
+      - args: [{name: x, value: i32}]
+        nullability: DECLARED_OUTPUT
+        decomposable: MANY
+        intermediate: i64
+        return: i64
+      - args: [{name: x, value: i64}]
+        nullability: DECLARED_OUTPUT
+        decomposable: MANY
+        intermediate: i64
+        return: i64
+      - args: [{name: x, value: fp64}]
+        nullability: DECLARED_OUTPUT
+        decomposable: MANY
+        intermediate: fp64
+        return: fp64
+
+  # ── min → KQL: min(arg0) ───────────────────────────────────────
+  - name: "min"
+    description: "Minimum value. Mapped to KQL `min()` aggregate."
+    impls:
+      - args: [{name: x, value: any}]
+        nullability: DECLARED_OUTPUT
+        decomposable: MANY
+        intermediate: any
+        return: any
+
+  # ── max → KQL: max(arg0) ───────────────────────────────────────
+  - name: "max"
+    description: "Maximum value. Mapped to KQL `max()` aggregate."
+    impls:
+      - args: [{name: x, value: any}]
+        nullability: DECLARED_OUTPUT
+        decomposable: MANY
+        intermediate: any
+        return: any
+
+  # ── avg → KQL: avg(arg0) ───────────────────────────────────────
+  - name: "avg"
+    description: "Arithmetic mean. Mapped to KQL `avg()` aggregate."
+    impls:
+      - args: [{name: x, value: fp64}]
+        nullability: DECLARED_OUTPUT
+        decomposable: MANY
+        intermediate: fp64
+        return: fp64
+
+  # ── any_value → KQL: any(arg0) ─────────────────────────────────
+  - name: "any_value"
+    description: "Arbitrary value from group. Mapped to KQL `any()` aggregate."
+    impls:
+      - args: [{name: x, value: any}]
+        nullability: DECLARED_OUTPUT
+        decomposable: MANY
+        intermediate: any
+        return: any
+
+  # ── approx_count_distinct → KQL: dcount(arg0) ──────────────────
+  - name: "approx_count_distinct"
+    description: "Approximate distinct count. Mapped to KQL `dcount()` aggregate."
+    impls:
+      - args: [{name: x, value: any}]
+        nullability: DECLARED_OUTPUT
+        decomposable: MANY
+        intermediate: i64
+        return: i64
+
+  # ── std_dev → KQL: stdev(arg0) ─────────────────────────────────
+  - name: "std_dev"
+    description: "Standard deviation. Mapped to KQL `stdev()` aggregate."
+    impls:
+      - args: [{name: x, value: fp64}]
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: fp64
+
+  # ── variance → KQL: variance(arg0) ─────────────────────────────
+  - name: "variance"
+    description: "Statistical variance. Mapped to KQL `variance()` aggregate."
+    impls:
+      - args: [{name: x, value: fp64}]
+        nullability: DECLARED_OUTPUT
+        decomposable: NONE
+        return: fp64

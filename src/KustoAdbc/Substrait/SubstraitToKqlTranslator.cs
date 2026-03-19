@@ -5,65 +5,55 @@ using System.Text;
 namespace KustoAdbc.Substrait
 {
     /// <summary>
-    /// Translates a Substrait binary plan into a KQL query string.
-    /// Phase 1: Uses Google.Protobuf for deserialization.
-    /// Phase 2 (future): Custom wire-format visitor for zero-allocation parsing.
+    /// Translates a Substrait binary plan into KQL.
+    /// Output is UTF-8 bytes (ready for HTTP) via <see cref="Utf8KqlWriter"/>.
     /// </summary>
     public static class SubstraitToKqlTranslator
     {
         /// <summary>
         /// Translates a Substrait binary plan to a KQL query string.
         /// </summary>
-        /// <param name="planBytes">Serialized Substrait Plan protobuf.</param>
-        /// <returns>A KQL query string.</returns>
         public static string Translate(byte[] planBytes)
+        {
+            return TranslateToUtf8(planBytes).ToString();
+        }
+
+        /// <summary>
+        /// Translates a Substrait binary plan to UTF-8 encoded KQL bytes.
+        /// The returned writer's <see cref="Utf8KqlWriter.WrittenMemory"/> is
+        /// ready for direct use as an HTTP request body.
+        /// </summary>
+        public static Utf8KqlWriter TranslateToUtf8(byte[] planBytes)
         {
             if (planBytes == null || planBytes.Length == 0)
                 throw new ArgumentException("Substrait plan is empty.", nameof(planBytes));
 
-            // Parse the plan using the Substrait protobuf schema.
-            // The Substrait plan is a tree of relations that we walk depth-first
-            // and translate to KQL's pipe-based syntax.
+            var writer = new Utf8KqlWriter();
             var reader = new SubstraitPlanReader(planBytes);
-            return reader.Translate();
+            reader.WriteTo(writer);
+            return writer;
         }
     }
 
     /// <summary>
-    /// Reads a Substrait plan from its protobuf wire format and translates to KQL.
-    ///
-    /// Substrait plan structure (simplified):
-    ///   Plan { relations: [PlanRel { root: RelRoot { input: Rel } }] }
-    ///
-    /// Rel is a oneof with variants:
-    ///   read, filter, project, aggregate, sort, join, fetch, set, ...
-    ///
-    /// We walk the tree bottom-up (the deepest ReadRel is the table source)
-    /// and emit KQL operators top-down (left to right in pipe syntax).
+    /// Reads a Substrait plan from its protobuf wire format and writes KQL
+    /// directly to a <see cref="Utf8KqlWriter"/>.
+    /// All KQL output is UTF-8 with zero intermediate string allocations.
     /// </summary>
     sealed class SubstraitPlanReader
     {
-        // Protobuf wire type constants
-        const int WireTypeVarint = 0;
-        const int WireTypeLengthDelimited = 2;
-
         readonly byte[] _data;
-        readonly string[] _extensionFunctions;
 
         public SubstraitPlanReader(byte[] data)
         {
             _data = data;
-            _extensionFunctions = Array.Empty<string>();
         }
 
-        public string Translate()
+        public void WriteTo(Utf8KqlWriter w)
         {
-            // Parse the top-level Plan message
             var span = _data.AsSpan();
             int pos = 0;
-
-            string[] functions = Array.Empty<string>();
-            string? result = null;
+            bool found = false;
 
             while (pos < span.Length)
             {
@@ -73,20 +63,19 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 2: // extensions (SimpleExtensionDeclaration)
+                    case 2: // extensions
                     {
                         int len = ReadVarint32(span, ref pos);
-                        // Parse extension declarations for function name resolution
-                        // (Needed to map function references to their names)
-                        pos += len; // Skip for now; function resolution is Phase 2
+                        pos += len;
                         break;
                     }
                     case 3: // relations (PlanRel)
                     {
                         int len = ReadVarint32(span, ref pos);
                         int end = pos + len;
-                        result = ReadPlanRel(span, ref pos, end);
+                        WritePlanRel(span, ref pos, end, w);
                         pos = end;
+                        found = true;
                         break;
                     }
                     default:
@@ -95,10 +84,10 @@ namespace KustoAdbc.Substrait
                 }
             }
 
-            return result ?? throw new InvalidOperationException("Substrait plan contains no relations.");
+            if (!found) throw new InvalidOperationException("Substrait plan contains no relations.");
         }
 
-        string ReadPlanRel(ReadOnlySpan<byte> span, ref int pos, int end)
+        void WritePlanRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             while (pos < end)
             {
@@ -108,21 +97,21 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // rel (Rel)
+                    case 1: // rel
                     {
                         int len = ReadVarint32(span, ref pos);
                         int relEnd = pos + len;
-                        string kql = ReadRel(span, ref pos, relEnd);
+                        WriteRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        return kql;
+                        return;
                     }
                     case 2: // root (RelRoot)
                     {
                         int len = ReadVarint32(span, ref pos);
                         int rootEnd = pos + len;
-                        string kql = ReadRelRoot(span, ref pos, rootEnd);
+                        WriteRelRoot(span, ref pos, rootEnd, w);
                         pos = rootEnd;
-                        return kql;
+                        return;
                     }
                     default:
                         SkipField(span, wireType, ref pos);
@@ -132,9 +121,8 @@ namespace KustoAdbc.Substrait
             throw new InvalidOperationException("PlanRel has no relation.");
         }
 
-        string ReadRelRoot(ReadOnlySpan<byte> span, ref int pos, int end)
+        void WriteRelRoot(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
-            string? relKql = null;
             while (pos < end)
             {
                 int tag = ReadTag(span, ref pos);
@@ -147,23 +135,19 @@ namespace KustoAdbc.Substrait
                     {
                         int len = ReadVarint32(span, ref pos);
                         int relEnd = pos + len;
-                        relKql = ReadRel(span, ref pos, relEnd);
+                        WriteRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        break;
+                        return;
                     }
                     default:
                         SkipField(span, wireType, ref pos);
                         break;
                 }
             }
-            return relKql ?? throw new InvalidOperationException("RelRoot has no input.");
+            throw new InvalidOperationException("RelRoot has no input.");
         }
 
-        /// <summary>
-        /// Reads a Rel message and dispatches to the appropriate handler.
-        /// Rel is a oneof; the field number tells us the variant.
-        /// </summary>
-        string ReadRel(ReadOnlySpan<byte> span, ref int pos, int end)
+        void WriteRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             while (pos < end)
             {
@@ -171,60 +155,52 @@ namespace KustoAdbc.Substrait
                 int fieldNumber = tag >> 3;
                 int wireType = tag & 0x7;
 
-                int len;
-                int relEnd;
+                int len, relEnd;
 
                 switch (fieldNumber)
                 {
                     case 1: // read
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
-                        var readKql = ReadReadRel(span, ref pos, relEnd);
+                        WriteReadRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        return readKql;
-
+                        return;
                     case 2: // filter
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
-                        var filterKql = ReadFilterRel(span, ref pos, relEnd);
+                        WriteFilterRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        return filterKql;
-
+                        return;
                     case 3: // fetch
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
-                        var fetchKql = ReadFetchRel(span, ref pos, relEnd);
+                        WriteFetchRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        return fetchKql;
-
+                        return;
                     case 4: // aggregate
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
-                        var aggKql = ReadAggregateRel(span, ref pos, relEnd);
+                        WriteAggregateRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        return aggKql;
-
+                        return;
                     case 5: // sort
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
-                        var sortKql = ReadSortRel(span, ref pos, relEnd);
+                        WriteSortRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        return sortKql;
-
+                        return;
                     case 6: // join
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
-                        var joinKql = ReadJoinRel(span, ref pos, relEnd);
+                        WriteJoinRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        return joinKql;
-
+                        return;
                     case 7: // project
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
-                        var projectKql = ReadProjectRel(span, ref pos, relEnd);
+                        WriteProjectRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        return projectKql;
-
+                        return;
                     default:
                         SkipField(span, wireType, ref pos);
                         break;
@@ -233,12 +209,10 @@ namespace KustoAdbc.Substrait
             throw new InvalidOperationException("Rel message has no recognized relation type.");
         }
 
-        #region Relation Readers
+        #region Relation Writers
 
-        string ReadReadRel(ReadOnlySpan<byte> span, ref int pos, int end)
+        void WriteReadRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
-            string? tableName = null;
-
             while (pos < end)
             {
                 int tag = ReadTag(span, ref pos);
@@ -247,26 +221,24 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 7: // named_table (NamedStruct → ReadRel.NamedTable)
+                    case 7: // named_table
                     {
                         int len = ReadVarint32(span, ref pos);
                         int ntEnd = pos + len;
-                        tableName = ReadNamedTable(span, ref pos, ntEnd);
+                        WriteNamedTable(span, ref pos, ntEnd, w);
                         pos = ntEnd;
-                        break;
+                        return;
                     }
                     default:
                         SkipField(span, wireType, ref pos);
                         break;
                 }
             }
-
-            return tableName ?? throw new InvalidOperationException("ReadRel has no named table.");
+            throw new InvalidOperationException("ReadRel has no named table.");
         }
 
-        string ReadNamedTable(ReadOnlySpan<byte> span, ref int pos, int end)
+        void WriteNamedTable(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
-            string? name = null;
             while (pos < end)
             {
                 int tag = ReadTag(span, ref pos);
@@ -275,14 +247,51 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // names (repeated string)
+                    case 1: // names (string) — already UTF-8 in the protobuf
                     {
                         int len = ReadVarint32(span, ref pos);
-                        name = Encoding.UTF8.GetString(span.Slice(pos, len)
-#if NETSTANDARD2_0
-                            .ToArray()
-#endif
-                        );
+                        w.WriteUtf8(span.Slice(pos, len));
+                        pos += len;
+                        return;
+                    }
+                    default:
+                        SkipField(span, wireType, ref pos);
+                        break;
+                }
+            }
+            throw new InvalidOperationException("NamedTable has no name.");
+        }
+
+        void WriteFilterRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        {
+            // We must parse both input and condition before writing,
+            // because protobuf fields can appear in any order.
+            // However, in practice, input (field 2) comes before condition (field 3).
+            // We use a two-pass approach: save positions, then write in order.
+
+            int inputStart = -1, inputLen = 0;
+            int condStart = -1, condLen = 0;
+
+            int saved = pos;
+            while (pos < end)
+            {
+                int tag = ReadTag(span, ref pos);
+                int fieldNumber = tag >> 3;
+                int wireType = tag & 0x7;
+
+                switch (fieldNumber)
+                {
+                    case 2: // input
+                    {
+                        int len = ReadVarint32(span, ref pos);
+                        inputStart = pos; inputLen = len;
+                        pos += len;
+                        break;
+                    }
+                    case 3: // condition
+                    {
+                        int len = ReadVarint32(span, ref pos);
+                        condStart = pos; condLen = len;
                         pos += len;
                         break;
                     }
@@ -291,13 +300,22 @@ namespace KustoAdbc.Substrait
                         break;
                 }
             }
-            return name ?? throw new InvalidOperationException("NamedTable has no name.");
+
+            if (inputStart < 0) throw new InvalidOperationException("FilterRel missing input.");
+            if (condStart < 0) throw new InvalidOperationException("FilterRel missing condition.");
+
+            int p = inputStart;
+            WriteRel(span, ref p, inputStart + inputLen, w);
+            w.Write(Utf8KqlWriter.PipeWhere);
+            p = condStart;
+            WriteExpression(span, ref p, condStart + condLen, w);
         }
 
-        string ReadFilterRel(ReadOnlySpan<byte> span, ref int pos, int end)
+        void WriteProjectRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
-            string? inputKql = null;
-            string? conditionKql = null;
+            // Collect expression positions, then write in order.
+            int inputStart = -1, inputLen = 0;
+            var exprPositions = new System.Collections.Generic.List<(int start, int len)>();
 
             while (pos < end)
             {
@@ -307,20 +325,18 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 2: // input (Rel)
+                    case 2:
                     {
                         int len = ReadVarint32(span, ref pos);
-                        int relEnd = pos + len;
-                        inputKql = ReadRel(span, ref pos, relEnd);
-                        pos = relEnd;
+                        inputStart = pos; inputLen = len;
+                        pos += len;
                         break;
                     }
-                    case 3: // condition (Expression)
+                    case 3:
                     {
                         int len = ReadVarint32(span, ref pos);
-                        int exprEnd = pos + len;
-                        conditionKql = ReadExpression(span, ref pos, exprEnd);
-                        pos = exprEnd;
+                        exprPositions.Add((pos, len));
+                        pos += len;
                         break;
                     }
                     default:
@@ -329,16 +345,27 @@ namespace KustoAdbc.Substrait
                 }
             }
 
-            if (inputKql == null) throw new InvalidOperationException("FilterRel missing input.");
-            if (conditionKql == null) throw new InvalidOperationException("FilterRel missing condition.");
+            if (inputStart < 0) throw new InvalidOperationException("ProjectRel missing input.");
 
-            return $"{inputKql}\n| where {conditionKql}";
+            int p = inputStart;
+            WriteRel(span, ref p, inputStart + inputLen, w);
+
+            if (exprPositions.Count > 0)
+            {
+                w.Write(Utf8KqlWriter.PipeProject);
+                for (int i = 0; i < exprPositions.Count; i++)
+                {
+                    if (i > 0) w.Write(Utf8KqlWriter.Comma);
+                    p = exprPositions[i].start;
+                    WriteExpression(span, ref p, exprPositions[i].start + exprPositions[i].len, w);
+                }
+            }
         }
 
-        string ReadProjectRel(ReadOnlySpan<byte> span, ref int pos, int end)
+        void WriteFetchRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
-            string? inputKql = null;
-            var expressions = new System.Collections.Generic.List<string>();
+            int inputStart = -1, inputLen = 0;
+            long offset = 0, count = -1;
 
             while (pos < end)
             {
@@ -348,83 +375,41 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 2: // input (Rel)
+                    case 2:
                     {
                         int len = ReadVarint32(span, ref pos);
-                        int relEnd = pos + len;
-                        inputKql = ReadRel(span, ref pos, relEnd);
-                        pos = relEnd;
+                        inputStart = pos; inputLen = len;
+                        pos += len;
                         break;
                     }
-                    case 3: // expressions (repeated Expression)
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        int exprEnd = pos + len;
-                        expressions.Add(ReadExpression(span, ref pos, exprEnd));
-                        pos = exprEnd;
-                        break;
-                    }
-                    default:
-                        SkipField(span, wireType, ref pos);
-                        break;
+                    case 3: offset = ReadVarint64(span, ref pos); break;
+                    case 4: count = ReadVarint64(span, ref pos); break;
+                    default: SkipField(span, wireType, ref pos); break;
                 }
             }
 
-            if (inputKql == null) throw new InvalidOperationException("ProjectRel missing input.");
-            if (expressions.Count == 0) return inputKql;
+            if (inputStart < 0) throw new InvalidOperationException("FetchRel missing input.");
 
-            return $"{inputKql}\n| project {string.Join(", ", expressions)}";
-        }
+            int p = inputStart;
+            WriteRel(span, ref p, inputStart + inputLen, w);
 
-        string ReadFetchRel(ReadOnlySpan<byte> span, ref int pos, int end)
-        {
-            string? inputKql = null;
-            long offset = 0;
-            long count = -1;
-
-            while (pos < end)
-            {
-                int tag = ReadTag(span, ref pos);
-                int fieldNumber = tag >> 3;
-                int wireType = tag & 0x7;
-
-                switch (fieldNumber)
-                {
-                    case 2: // input (Rel)
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        int relEnd = pos + len;
-                        inputKql = ReadRel(span, ref pos, relEnd);
-                        pos = relEnd;
-                        break;
-                    }
-                    case 3: // offset (int64)
-                        offset = ReadVarint64(span, ref pos);
-                        break;
-                    case 4: // count (int64)
-                        count = ReadVarint64(span, ref pos);
-                        break;
-                    default:
-                        SkipField(span, wireType, ref pos);
-                        break;
-                }
-            }
-
-            if (inputKql == null) throw new InvalidOperationException("FetchRel missing input.");
-
-            var sb = new StringBuilder(inputKql);
             if (offset > 0)
-                sb.Append($"\n| serialize\n| where row_number() > {offset}");
+            {
+                w.Write(Utf8KqlWriter.PipeSerialize);
+                w.Write(Utf8KqlWriter.WhereRowNumber);
+                w.WriteInt64(offset);
+            }
             if (count >= 0)
-                sb.Append($"\n| take {count}");
-
-            return sb.ToString();
+            {
+                w.Write(Utf8KqlWriter.PipeTake);
+                w.WriteInt64(count);
+            }
         }
 
-        string ReadSortRel(ReadOnlySpan<byte> span, ref int pos, int end)
+        void WriteSortRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
-            string? inputKql = null;
-            var sortFields = new System.Collections.Generic.List<string>();
+            int inputStart = -1, inputLen = 0;
+            var sortPositions = new System.Collections.Generic.List<(int start, int len)>();
 
             while (pos < end)
             {
@@ -434,38 +419,45 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 2: // input (Rel)
+                    case 2:
                     {
                         int len = ReadVarint32(span, ref pos);
-                        int relEnd = pos + len;
-                        inputKql = ReadRel(span, ref pos, relEnd);
-                        pos = relEnd;
+                        inputStart = pos; inputLen = len;
+                        pos += len;
                         break;
                     }
-                    case 3: // sorts (repeated SortField)
+                    case 3:
                     {
                         int len = ReadVarint32(span, ref pos);
-                        int sfEnd = pos + len;
-                        sortFields.Add(ReadSortField(span, ref pos, sfEnd));
-                        pos = sfEnd;
+                        sortPositions.Add((pos, len));
+                        pos += len;
                         break;
                     }
-                    default:
-                        SkipField(span, wireType, ref pos);
-                        break;
+                    default: SkipField(span, wireType, ref pos); break;
                 }
             }
 
-            if (inputKql == null) throw new InvalidOperationException("SortRel missing input.");
-            if (sortFields.Count == 0) return inputKql;
+            if (inputStart < 0) throw new InvalidOperationException("SortRel missing input.");
 
-            return $"{inputKql}\n| sort by {string.Join(", ", sortFields)}";
+            int p = inputStart;
+            WriteRel(span, ref p, inputStart + inputLen, w);
+
+            if (sortPositions.Count > 0)
+            {
+                w.Write(Utf8KqlWriter.PipeSortBy);
+                for (int i = 0; i < sortPositions.Count; i++)
+                {
+                    if (i > 0) w.Write(Utf8KqlWriter.Comma);
+                    p = sortPositions[i].start;
+                    WriteSortField(span, ref p, sortPositions[i].start + sortPositions[i].len, w);
+                }
+            }
         }
 
-        string ReadSortField(ReadOnlySpan<byte> span, ref int pos, int end)
+        void WriteSortField(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
-            string? expr = null;
-            int direction = 0; // 0=unspecified, 1=asc_nulls_first, 2=asc_nulls_last, 3=desc_nulls_first, 4=desc_nulls_last, 5=clustered
+            int exprStart = -1, exprLen = 0;
+            int direction = 0;
 
             while (pos < end)
             {
@@ -475,134 +467,108 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // expr (Expression)
+                    case 1:
                     {
                         int len = ReadVarint32(span, ref pos);
+                        exprStart = pos; exprLen = len;
+                        pos += len;
+                        break;
+                    }
+                    case 2: direction = ReadVarint32(span, ref pos); break;
+                    default: SkipField(span, wireType, ref pos); break;
+                }
+            }
+
+            if (exprStart < 0) throw new InvalidOperationException("SortField missing expression.");
+
+            int p = exprStart;
+            WriteExpression(span, ref p, exprStart + exprLen, w);
+
+            if (direction is 1 or 2) w.Write(Utf8KqlWriter.Asc);
+            else if (direction is 3 or 4) w.Write(Utf8KqlWriter.Desc);
+        }
+
+        void WriteAggregateRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        {
+            int inputStart = -1, inputLen = 0;
+            var groupPositions = new System.Collections.Generic.List<(int start, int len)>();
+            var measurePositions = new System.Collections.Generic.List<(int start, int len)>();
+
+            while (pos < end)
+            {
+                int tag = ReadTag(span, ref pos);
+                int fieldNumber = tag >> 3;
+                int wireType = tag & 0x7;
+
+                switch (fieldNumber)
+                {
+                    case 2:
+                    {
+                        int len = ReadVarint32(span, ref pos);
+                        inputStart = pos; inputLen = len;
+                        pos += len;
+                        break;
+                    }
+                    case 3:
+                    {
+                        int len = ReadVarint32(span, ref pos);
+                        groupPositions.Add((pos, len));
+                        pos += len;
+                        break;
+                    }
+                    case 4:
+                    {
+                        int len = ReadVarint32(span, ref pos);
+                        measurePositions.Add((pos, len));
+                        pos += len;
+                        break;
+                    }
+                    default: SkipField(span, wireType, ref pos); break;
+                }
+            }
+
+            if (inputStart < 0) throw new InvalidOperationException("AggregateRel missing input.");
+
+            int p = inputStart;
+            WriteRel(span, ref p, inputStart + inputLen, w);
+
+            w.Write(Utf8KqlWriter.PipeSummarize);
+
+            // Measures
+            for (int i = 0; i < measurePositions.Count; i++)
+            {
+                if (i > 0) w.Write(Utf8KqlWriter.Comma);
+                p = measurePositions[i].start;
+                WriteMeasure(span, ref p, measurePositions[i].start + measurePositions[i].len, w);
+            }
+
+            // Groupings
+            bool firstGrouping = true;
+            for (int gi = 0; gi < groupPositions.Count; gi++)
+            {
+                p = groupPositions[gi].start;
+                int gEnd = groupPositions[gi].start + groupPositions[gi].len;
+                WriteGroupingExprs(span, ref p, gEnd, w, ref firstGrouping);
+            }
+        }
+
+        void WriteGroupingExprs(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, ref bool first)
+        {
+            while (pos < end)
+            {
+                int tag = ReadTag(span, ref pos);
+                int fieldNumber = tag >> 3;
+                int wireType = tag & 0x7;
+
+                switch (fieldNumber)
+                {
+                    case 1: // grouping_expressions
+                    {
+                        int len = ReadVarint32(span, ref pos);
+                        if (first) { w.Write(Utf8KqlWriter.SummarizeBy); first = false; }
+                        else { w.Write(Utf8KqlWriter.Comma); }
                         int exprEnd = pos + len;
-                        expr = ReadExpression(span, ref pos, exprEnd);
-                        pos = exprEnd;
-                        break;
-                    }
-                    case 2: // direction (enum SortDirection)
-                        direction = ReadVarint32(span, ref pos);
-                        break;
-                    default:
-                        SkipField(span, wireType, ref pos);
-                        break;
-                }
-            }
-
-            if (expr == null) throw new InvalidOperationException("SortField missing expression.");
-
-            string dir = direction switch
-            {
-                1 or 2 => " asc",
-                3 or 4 => " desc",
-                _ => ""
-            };
-
-            return $"{expr}{dir}";
-        }
-
-        string ReadAggregateRel(ReadOnlySpan<byte> span, ref int pos, int end)
-        {
-            string? inputKql = null;
-            var groupings = new System.Collections.Generic.List<string>();
-            var measures = new System.Collections.Generic.List<string>();
-
-            while (pos < end)
-            {
-                int tag = ReadTag(span, ref pos);
-                int fieldNumber = tag >> 3;
-                int wireType = tag & 0x7;
-
-                switch (fieldNumber)
-                {
-                    case 2: // input (Rel)
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        int relEnd = pos + len;
-                        inputKql = ReadRel(span, ref pos, relEnd);
-                        pos = relEnd;
-                        break;
-                    }
-                    case 3: // groupings (repeated Grouping)
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        int gEnd = pos + len;
-                        ReadGrouping(span, ref pos, gEnd, groupings);
-                        pos = gEnd;
-                        break;
-                    }
-                    case 4: // measures (repeated Measure)
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        int mEnd = pos + len;
-                        measures.Add(ReadMeasure(span, ref pos, mEnd));
-                        pos = mEnd;
-                        break;
-                    }
-                    default:
-                        SkipField(span, wireType, ref pos);
-                        break;
-                }
-            }
-
-            if (inputKql == null) throw new InvalidOperationException("AggregateRel missing input.");
-
-            var sb = new StringBuilder(inputKql);
-            sb.Append("\n| summarize ");
-            sb.Append(string.Join(", ", measures));
-            if (groupings.Count > 0)
-            {
-                sb.Append(" by ");
-                sb.Append(string.Join(", ", groupings));
-            }
-
-            return sb.ToString();
-        }
-
-        void ReadGrouping(ReadOnlySpan<byte> span, ref int pos, int end, System.Collections.Generic.List<string> groupings)
-        {
-            while (pos < end)
-            {
-                int tag = ReadTag(span, ref pos);
-                int fieldNumber = tag >> 3;
-                int wireType = tag & 0x7;
-
-                switch (fieldNumber)
-                {
-                    case 1: // grouping_expressions (repeated Expression)
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        int exprEnd = pos + len;
-                        groupings.Add(ReadExpression(span, ref pos, exprEnd));
-                        pos = exprEnd;
-                        break;
-                    }
-                    default:
-                        SkipField(span, wireType, ref pos);
-                        break;
-                }
-            }
-        }
-
-        string ReadMeasure(ReadOnlySpan<byte> span, ref int pos, int end)
-        {
-            string? measureExpr = null;
-            while (pos < end)
-            {
-                int tag = ReadTag(span, ref pos);
-                int fieldNumber = tag >> 3;
-                int wireType = tag & 0x7;
-
-                switch (fieldNumber)
-                {
-                    case 1: // measure (AggregateFunction wrapped in Expression)
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        int exprEnd = pos + len;
-                        measureExpr = ReadExpression(span, ref pos, exprEnd);
+                        WriteExpression(span, ref pos, exprEnd, w);
                         pos = exprEnd;
                         break;
                     }
@@ -611,15 +577,42 @@ namespace KustoAdbc.Substrait
                         break;
                 }
             }
-            return measureExpr ?? "count()";
         }
 
-        string ReadJoinRel(ReadOnlySpan<byte> span, ref int pos, int end)
+        void WriteMeasure(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
-            string? leftKql = null;
-            string? rightKql = null;
-            string? condition = null;
-            int joinType = 0; // 0=unspecified, 1=inner, 2=outer, 3=left, 4=right, ...
+            bool found = false;
+            while (pos < end)
+            {
+                int tag = ReadTag(span, ref pos);
+                int fieldNumber = tag >> 3;
+                int wireType = tag & 0x7;
+
+                switch (fieldNumber)
+                {
+                    case 1: // measure expression
+                    {
+                        int len = ReadVarint32(span, ref pos);
+                        int exprEnd = pos + len;
+                        WriteExpression(span, ref pos, exprEnd, w);
+                        pos = exprEnd;
+                        found = true;
+                        break;
+                    }
+                    default:
+                        SkipField(span, wireType, ref pos);
+                        break;
+                }
+            }
+            if (!found) w.Write(Utf8KqlWriter.CountFunc);
+        }
+
+        void WriteJoinRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        {
+            int leftStart = -1, leftLen = 0;
+            int rightStart = -1, rightLen = 0;
+            int condStart = -1, condLen = 0;
+            int joinType = 0;
 
             while (pos < end)
             {
@@ -629,70 +622,50 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 2: // left (Rel)
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        int relEnd = pos + len;
-                        leftKql = ReadRel(span, ref pos, relEnd);
-                        pos = relEnd;
-                        break;
-                    }
-                    case 3: // right (Rel)
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        int relEnd = pos + len;
-                        rightKql = ReadRel(span, ref pos, relEnd);
-                        pos = relEnd;
-                        break;
-                    }
-                    case 4: // expression (Expression - join condition)
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        int exprEnd = pos + len;
-                        condition = ReadExpression(span, ref pos, exprEnd);
-                        pos = exprEnd;
-                        break;
-                    }
-                    case 5: // type (JoinType enum)
-                        joinType = ReadVarint32(span, ref pos);
-                        break;
-                    default:
-                        SkipField(span, wireType, ref pos);
-                        break;
+                    case 2: { int len = ReadVarint32(span, ref pos); leftStart = pos; leftLen = len; pos += len; break; }
+                    case 3: { int len = ReadVarint32(span, ref pos); rightStart = pos; rightLen = len; pos += len; break; }
+                    case 4: { int len = ReadVarint32(span, ref pos); condStart = pos; condLen = len; pos += len; break; }
+                    case 5: joinType = ReadVarint32(span, ref pos); break;
+                    default: SkipField(span, wireType, ref pos); break;
                 }
             }
 
-            if (leftKql == null || rightKql == null)
+            if (leftStart < 0 || rightStart < 0)
                 throw new InvalidOperationException("JoinRel missing left or right input.");
 
-            string kind = joinType switch
+            int p = leftStart;
+            WriteRel(span, ref p, leftStart + leftLen, w);
+
+            w.Write(Utf8KqlWriter.PipeJoinKind);
+            w.Write(joinType switch
             {
-                1 => "inner",
-                2 => "fullouter",
-                3 => "leftouter",
-                4 => "rightouter",
-                5 => "leftsemi",
-                6 => "leftanti",
-                _ => "inner"
-            };
+                1 => Utf8KqlWriter.JoinInner,
+                2 => Utf8KqlWriter.JoinFullOuter,
+                3 => Utf8KqlWriter.JoinLeftOuter,
+                4 => Utf8KqlWriter.JoinRightOuter,
+                5 => Utf8KqlWriter.JoinLeftSemi,
+                6 => Utf8KqlWriter.JoinLeftAnti,
+                _ => Utf8KqlWriter.JoinInner,
+            });
+            w.Write((byte)' ');
+            w.Write((byte)'(');
+            p = rightStart;
+            WriteRel(span, ref p, rightStart + rightLen, w);
+            w.Write((byte)')');
 
-            var sb = new StringBuilder(leftKql);
-            sb.Append($"\n| join kind={kind} ({rightKql})");
-            if (condition != null)
-                sb.Append($" on {condition}");
-
-            return sb.ToString();
+            if (condStart >= 0)
+            {
+                w.Write(Utf8KqlWriter.JoinOn);
+                p = condStart;
+                WriteExpression(span, ref p, condStart + condLen, w);
+            }
         }
 
         #endregion
 
-        #region Expression Reader
+        #region Expression Writers
 
-        /// <summary>
-        /// Reads a Substrait Expression and returns a KQL expression string.
-        /// Expression is a oneof with many variants.
-        /// </summary>
-        string ReadExpression(ReadOnlySpan<byte> span, ref int pos, int end)
+        void WriteExpression(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             while (pos < end)
             {
@@ -700,48 +673,43 @@ namespace KustoAdbc.Substrait
                 int fieldNumber = tag >> 3;
                 int wireType = tag & 0x7;
 
-                int len;
-                int exprEnd;
+                int len, exprEnd;
 
                 switch (fieldNumber)
                 {
-                    case 1: // literal (Expression.Literal)
+                    case 1: // literal
                         len = ReadVarint32(span, ref pos);
                         exprEnd = pos + len;
-                        var lit = ReadLiteral(span, ref pos, exprEnd);
+                        WriteLiteral(span, ref pos, exprEnd, w);
                         pos = exprEnd;
-                        return lit;
-
+                        return;
                     case 2: // selection (FieldReference)
                         len = ReadVarint32(span, ref pos);
                         exprEnd = pos + len;
-                        var field = ReadFieldReference(span, ref pos, exprEnd);
+                        WriteFieldReference(span, ref pos, exprEnd, w);
                         pos = exprEnd;
-                        return field;
-
-                    case 3: // scalar_function (ScalarFunction)
+                        return;
+                    case 3: // scalar_function
                         len = ReadVarint32(span, ref pos);
                         exprEnd = pos + len;
-                        var func = ReadScalarFunction(span, ref pos, exprEnd);
+                        WriteScalarFunction(span, ref pos, exprEnd, w);
                         pos = exprEnd;
-                        return func;
-
-                    case 5: // if_then (IfThen)
+                        return;
+                    case 5: // if_then
                         len = ReadVarint32(span, ref pos);
                         exprEnd = pos + len;
-                        var ifThen = ReadIfThen(span, ref pos, exprEnd);
+                        WriteIfThen(span, ref pos, exprEnd, w);
                         pos = exprEnd;
-                        return ifThen;
-
+                        return;
                     default:
                         SkipField(span, wireType, ref pos);
                         break;
                 }
             }
-            return "/* unknown expression */";
+            w.Write(Utf8KqlWriter.UnknownExpr);
         }
 
-        string ReadLiteral(ReadOnlySpan<byte> span, ref int pos, int end)
+        void WriteLiteral(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             while (pos < end)
             {
@@ -752,59 +720,58 @@ namespace KustoAdbc.Substrait
                 switch (fieldNumber)
                 {
                     case 1: // boolean
-                        return ReadVarint32(span, ref pos) != 0 ? "true" : "false";
+                        w.Write(ReadVarint32(span, ref pos) != 0 ? Utf8KqlWriter.True : Utf8KqlWriter.False);
+                        return;
                     case 2: // i8
                     case 3: // i16
                     case 5: // i32
-                        return ReadVarint32(span, ref pos).ToString();
+                        w.WriteInt32(ReadVarint32(span, ref pos));
+                        return;
                     case 7: // i64
-                        return ReadVarint64(span, ref pos).ToString();
+                        w.WriteInt64(ReadVarint64(span, ref pos));
+                        return;
                     case 10: // fp32
                     {
                         int bits = ReadFixed32(span, ref pos);
 #if NETSTANDARD2_0
-                        unsafe { float f = *(float*)&bits; return f.ToString("G"); }
+                        float f; unsafe { f = *(float*)&bits; }
 #else
-                        return BitConverter.Int32BitsToSingle(bits).ToString("G");
+                        float f = BitConverter.Int32BitsToSingle(bits);
 #endif
+                        w.WriteFloat(f);
+                        return;
                     }
                     case 11: // fp64
                     {
                         long bits = ReadFixed64(span, ref pos);
-                        return BitConverter.Int64BitsToDouble(bits).ToString("G");
+                        w.WriteDouble(BitConverter.Int64BitsToDouble(bits));
+                        return;
                     }
-                    case 12: // string
+                    case 12: // string — the protobuf bytes are already UTF-8
                     {
                         int len = ReadVarint32(span, ref pos);
-                        string s = Encoding.UTF8.GetString(span.Slice(pos, len)
-#if NETSTANDARD2_0
-                            .ToArray()
-#endif
-                        );
+                        w.WriteKqlStringLiteral(span.Slice(pos, len));
                         pos += len;
-                        return $"'{EscapeKqlString(s)}'";
+                        return;
                     }
-                    case 26: // null (Type)
+                    case 26: // null
                     {
                         int len = ReadVarint32(span, ref pos);
                         pos += len;
-                        return "dynamic(null)";
+                        w.Write(Utf8KqlWriter.DynamicNull);
+                        return;
                     }
                     default:
                         SkipField(span, wireType, ref pos);
                         break;
                 }
             }
-            return "dynamic(null)";
+            w.Write(Utf8KqlWriter.DynamicNull);
         }
 
-        string ReadFieldReference(ReadOnlySpan<byte> span, ref int pos, int end)
+        void WriteFieldReference(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
-            // FieldReference contains a ReferenceSegment chain.
-            // The simplest case is a direct reference to a field by index.
-            // We return the field index as $N — the caller maps to column names.
             int fieldIndex = -1;
-
             while (pos < end)
             {
                 int tag = ReadTag(span, ref pos);
@@ -813,7 +780,7 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // direct_reference (ReferenceSegment)
+                    case 1: // direct_reference
                     {
                         int len = ReadVarint32(span, ref pos);
                         int refEnd = pos + len;
@@ -828,9 +795,9 @@ namespace KustoAdbc.Substrait
             }
 
             if (fieldIndex >= 0)
-                return $"$field{fieldIndex}";
-
-            return "/* unknown field */";
+                w.WriteFieldRef(fieldIndex);
+            else
+                w.Write(Utf8KqlWriter.UnknownField);
         }
 
         int ReadReferenceSegment(ReadOnlySpan<byte> span, ref int pos, int end)
@@ -843,8 +810,8 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // map_key — skip
-                    case 2: // list_element — skip
+                    case 1:
+                    case 2:
                     {
                         int len = ReadVarint32(span, ref pos);
                         pos += len;
@@ -877,21 +844,17 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // field (int32)
-                        fieldIndex = ReadVarint32(span, ref pos);
-                        break;
-                    default:
-                        SkipField(span, wireType, ref pos);
-                        break;
+                    case 1: fieldIndex = ReadVarint32(span, ref pos); break;
+                    default: SkipField(span, wireType, ref pos); break;
                 }
             }
             return fieldIndex;
         }
 
-        string ReadScalarFunction(ReadOnlySpan<byte> span, ref int pos, int end)
+        void WriteScalarFunction(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             int functionRef = 0;
-            var args = new System.Collections.Generic.List<string>();
+            var argPositions = new System.Collections.Generic.List<(int start, int len)>();
 
             while (pos < end)
             {
@@ -901,31 +864,31 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // function_reference (uint32)
-                        functionRef = ReadVarint32(span, ref pos);
-                        break;
-                    case 4: // arguments (repeated FunctionArgument)
+                    case 1: functionRef = ReadVarint32(span, ref pos); break;
+                    case 4:
                     {
                         int len = ReadVarint32(span, ref pos);
-                        int argEnd = pos + len;
-                        args.Add(ReadFunctionArgument(span, ref pos, argEnd));
-                        pos = argEnd;
+                        argPositions.Add((pos, len));
+                        pos += len;
                         break;
                     }
-                    default:
-                        SkipField(span, wireType, ref pos);
-                        break;
+                    default: SkipField(span, wireType, ref pos); break;
                 }
             }
 
-            // Map well-known function references to KQL.
-            // In a full implementation, we'd resolve functionRef via the extension declarations.
-            // For now, emit a generic function call.
-            string funcName = MapFunctionRef(functionRef);
-            return $"{funcName}({string.Join(", ", args)})";
+            w.Write(Utf8KqlWriter.FuncPrefix);
+            w.WriteInt32(functionRef);
+            w.Write((byte)'(');
+            for (int i = 0; i < argPositions.Count; i++)
+            {
+                if (i > 0) w.Write(Utf8KqlWriter.Comma);
+                int p = argPositions[i].start;
+                WriteFunctionArgument(span, ref p, argPositions[i].start + argPositions[i].len, w);
+            }
+            w.Write((byte)')');
         }
 
-        string ReadFunctionArgument(ReadOnlySpan<byte> span, ref int pos, int end)
+        void WriteFunctionArgument(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             while (pos < end)
             {
@@ -939,23 +902,22 @@ namespace KustoAdbc.Substrait
                     {
                         int len = ReadVarint32(span, ref pos);
                         int exprEnd = pos + len;
-                        var expr = ReadExpression(span, ref pos, exprEnd);
+                        WriteExpression(span, ref pos, exprEnd, w);
                         pos = exprEnd;
-                        return expr;
+                        return;
                     }
                     default:
                         SkipField(span, wireType, ref pos);
                         break;
                 }
             }
-            return "/* unknown arg */";
+            w.Write(Utf8KqlWriter.UnknownArg);
         }
 
-        string ReadIfThen(ReadOnlySpan<byte> span, ref int pos, int end)
+        void WriteIfThen(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
-            // Translate to KQL iif() for simple cases
-            var conditions = new System.Collections.Generic.List<(string cond, string then)>();
-            string? elseExpr = null;
+            var clausePositions = new System.Collections.Generic.List<(int start, int len)>();
+            int elseStart = -1, elseLen = 0;
 
             while (pos < end)
             {
@@ -965,48 +927,45 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // ifs (repeated IfClause)
+                    case 1:
                     {
                         int len = ReadVarint32(span, ref pos);
-                        int clauseEnd = pos + len;
-                        var clause = ReadIfClause(span, ref pos, clauseEnd);
-                        conditions.Add(clause);
-                        pos = clauseEnd;
+                        clausePositions.Add((pos, len));
+                        pos += len;
                         break;
                     }
-                    case 2: // else (Expression)
+                    case 2:
                     {
                         int len = ReadVarint32(span, ref pos);
-                        int exprEnd = pos + len;
-                        elseExpr = ReadExpression(span, ref pos, exprEnd);
-                        pos = exprEnd;
+                        elseStart = pos; elseLen = len;
+                        pos += len;
                         break;
                     }
-                    default:
-                        SkipField(span, wireType, ref pos);
-                        break;
+                    default: SkipField(span, wireType, ref pos); break;
                 }
             }
 
-            if (conditions.Count == 1)
-                return $"iif({conditions[0].cond}, {conditions[0].then}, {elseExpr ?? "dynamic(null)"})";
-
-            // For multiple conditions, use nested case/iif
-            var sb = new StringBuilder();
-            for (int i = 0; i < conditions.Count; i++)
+            // Emit nested iif()
+            for (int i = 0; i < clausePositions.Count; i++)
             {
-                if (i > 0) sb.Append(", ");
-                sb.Append($"iif({conditions[i].cond}, {conditions[i].then}");
+                if (i > 0) { w.Write(Utf8KqlWriter.Comma); w.Write((byte)' '); }
+                w.Write(Utf8KqlWriter.Iif);
+                int p = clausePositions[i].start;
+                WriteIfClause(span, ref p, clausePositions[i].start + clausePositions[i].len, w);
             }
-            sb.Append($", {elseExpr ?? "dynamic(null)"}");
-            for (int i = 0; i < conditions.Count; i++) sb.Append(')');
-            return sb.ToString();
+
+            w.Write(Utf8KqlWriter.Comma);
+            w.Write((byte)' ');
+            if (elseStart >= 0) { int p = elseStart; WriteExpression(span, ref p, elseStart + elseLen, w); }
+            else { w.Write(Utf8KqlWriter.DynamicNull); }
+
+            for (int i = 0; i < clausePositions.Count; i++) w.Write((byte)')');
         }
 
-        (string cond, string then) ReadIfClause(ReadOnlySpan<byte> span, ref int pos, int end)
+        void WriteIfClause(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
-            string? cond = null;
-            string? then = null;
+            int condStart = -1, condLen = 0;
+            int thenStart = -1, thenLen = 0;
 
             while (pos < end)
             {
@@ -1016,40 +975,20 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // if (Expression)
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        int exprEnd = pos + len;
-                        cond = ReadExpression(span, ref pos, exprEnd);
-                        pos = exprEnd;
-                        break;
-                    }
-                    case 2: // then (Expression)
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        int exprEnd = pos + len;
-                        then = ReadExpression(span, ref pos, exprEnd);
-                        pos = exprEnd;
-                        break;
-                    }
-                    default:
-                        SkipField(span, wireType, ref pos);
-                        break;
+                    case 1: { int len = ReadVarint32(span, ref pos); condStart = pos; condLen = len; pos += len; break; }
+                    case 2: { int len = ReadVarint32(span, ref pos); thenStart = pos; thenLen = len; pos += len; break; }
+                    default: SkipField(span, wireType, ref pos); break;
                 }
             }
 
-            return (cond ?? "true", then ?? "dynamic(null)");
-        }
+            if (condStart >= 0) { int p = condStart; WriteExpression(span, ref p, condStart + condLen, w); }
+            else { w.Write(Utf8KqlWriter.True); }
 
-        #endregion
+            w.Write(Utf8KqlWriter.Comma);
+            w.Write((byte)' ');
 
-        #region Function Mapping
-
-        static string MapFunctionRef(int functionRef)
-        {
-            // Default mapping — in a full implementation this would be resolved
-            // from the plan's extension declarations.
-            return $"func_{functionRef}";
+            if (thenStart >= 0) { int p = thenStart; WriteExpression(span, ref p, thenStart + thenLen, w); }
+            else { w.Write(Utf8KqlWriter.DynamicNull); }
         }
 
         #endregion
@@ -1110,25 +1049,13 @@ namespace KustoAdbc.Substrait
         {
             switch (wireType)
             {
-                case 0: // Varint
-                    while ((span[pos++] & 0x80) != 0) { }
-                    break;
-                case 1: // 64-bit
-                    pos += 8;
-                    break;
-                case 2: // Length-delimited
-                    int len = ReadVarint32(span, ref pos);
-                    pos += len;
-                    break;
-                case 5: // 32-bit
-                    pos += 4;
-                    break;
-                default:
-                    throw new InvalidOperationException($"Unknown wire type: {wireType}");
+                case 0: while ((span[pos++] & 0x80) != 0) { } break;
+                case 1: pos += 8; break;
+                case 2: int len = ReadVarint32(span, ref pos); pos += len; break;
+                case 5: pos += 4; break;
+                default: throw new InvalidOperationException($"Unknown wire type: {wireType}");
             }
         }
-
-        static string EscapeKqlString(string s) => s.Replace("'", "\\'");
 
         #endregion
     }

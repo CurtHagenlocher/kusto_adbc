@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Text;
 
@@ -43,6 +44,10 @@ namespace KustoAdbc.Substrait
     sealed class SubstraitPlanReader
     {
         readonly byte[] _data;
+        // Populated during Plan-level parsing: function_anchor → function_name
+        readonly Dictionary<int, string> _functionAnchors = new();
+        // extension_urn_anchor → uri (currently informational)
+        readonly Dictionary<int, string> _extensionUris = new();
 
         public SubstraitPlanReader(byte[] data)
         {
@@ -55,6 +60,11 @@ namespace KustoAdbc.Substrait
             int pos = 0;
             bool found = false;
 
+            // Two-pass: first collect all extension URNs and declarations,
+            // then process relations. Since protobuf fields may appear in any
+            // order, we record positions of relations and process after extensions.
+            var relationPositions = new List<(int start, int len)>();
+
             while (pos < span.Length)
             {
                 int tag = ReadTag(span, ref pos);
@@ -63,19 +73,28 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 2: // extensions
+                    case 2: // extensions (SimpleExtensionDeclaration)
                     {
                         int len = ReadVarint32(span, ref pos);
-                        pos += len;
+                        int end = pos + len;
+                        ParseExtensionDeclaration(span, ref pos, end);
+                        pos = end;
                         break;
                     }
                     case 3: // relations (PlanRel)
                     {
                         int len = ReadVarint32(span, ref pos);
-                        int end = pos + len;
-                        WritePlanRel(span, ref pos, end, w);
-                        pos = end;
+                        relationPositions.Add((pos, len));
+                        pos += len;
                         found = true;
+                        break;
+                    }
+                    case 8: // extension_urns (SimpleExtensionURN) — in some plan versions
+                    {
+                        int len = ReadVarint32(span, ref pos);
+                        int end = pos + len;
+                        ParseExtensionUri(span, ref pos, end);
+                        pos = end;
                         break;
                     }
                     default:
@@ -85,6 +104,113 @@ namespace KustoAdbc.Substrait
             }
 
             if (!found) throw new InvalidOperationException("Substrait plan contains no relations.");
+
+            // Now process the first relation with extension context available
+            int p = relationPositions[0].start;
+            WritePlanRel(span, ref p, relationPositions[0].start + relationPositions[0].len, w);
+        }
+
+        void ParseExtensionUri(ReadOnlySpan<byte> span, ref int pos, int end)
+        {
+            int anchor = 0;
+            string? uri = null;
+
+            while (pos < end)
+            {
+                int tag = ReadTag(span, ref pos);
+                int fieldNumber = tag >> 3;
+                int wireType = tag & 0x7;
+
+                switch (fieldNumber)
+                {
+                    case 1: // extension_urn_anchor
+                        anchor = ReadVarint32(span, ref pos);
+                        break;
+                    case 2: // uri
+                    {
+                        int len = ReadVarint32(span, ref pos);
+#if NETSTANDARD2_0
+                        uri = System.Text.Encoding.UTF8.GetString(span.Slice(pos, len).ToArray());
+#else
+                        uri = System.Text.Encoding.UTF8.GetString(span.Slice(pos, len));
+#endif
+                        pos += len;
+                        break;
+                    }
+                    default:
+                        SkipField(span, wireType, ref pos);
+                        break;
+                }
+            }
+
+            if (uri != null)
+                _extensionUris[anchor] = uri;
+        }
+
+        void ParseExtensionDeclaration(ReadOnlySpan<byte> span, ref int pos, int end)
+        {
+            // SimpleExtensionDeclaration is a oneof: extension_type(1), extension_type_variation(2), extension_function(3)
+            while (pos < end)
+            {
+                int tag = ReadTag(span, ref pos);
+                int fieldNumber = tag >> 3;
+                int wireType = tag & 0x7;
+
+                switch (fieldNumber)
+                {
+                    case 3: // extension_function
+                    {
+                        int len = ReadVarint32(span, ref pos);
+                        int fEnd = pos + len;
+                        ParseExtensionFunction(span, ref pos, fEnd);
+                        pos = fEnd;
+                        break;
+                    }
+                    default:
+                        SkipField(span, wireType, ref pos);
+                        break;
+                }
+            }
+        }
+
+        void ParseExtensionFunction(ReadOnlySpan<byte> span, ref int pos, int end)
+        {
+            int anchor = 0;
+            string? name = null;
+
+            while (pos < end)
+            {
+                int tag = ReadTag(span, ref pos);
+                int fieldNumber = tag >> 3;
+                int wireType = tag & 0x7;
+
+                switch (fieldNumber)
+                {
+                    case 2: // function_anchor
+                        anchor = ReadVarint32(span, ref pos);
+                        break;
+                    case 3: // name (function signature, e.g., "add:i32_i32")
+                    {
+                        int len = ReadVarint32(span, ref pos);
+#if NETSTANDARD2_0
+                        name = System.Text.Encoding.UTF8.GetString(span.Slice(pos, len).ToArray());
+#else
+                        name = System.Text.Encoding.UTF8.GetString(span.Slice(pos, len));
+#endif
+                        pos += len;
+                        break;
+                    }
+                    case 4: // extension_urn_reference
+                        ReadVarint32(span, ref pos); // Consumed but not needed for name resolution
+                        break;
+                    default:
+                        SkipField(span, wireType, ref pos);
+                        break;
+                }
+            }
+
+            if (name != null)
+                _functionAnchors[anchor] = name;
         }
 
         void WritePlanRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
@@ -854,7 +980,7 @@ namespace KustoAdbc.Substrait
         void WriteScalarFunction(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             int functionRef = 0;
-            var argPositions = new System.Collections.Generic.List<(int start, int len)>();
+            var argPositions = new List<(int start, int len)>();
 
             while (pos < end)
             {
@@ -876,17 +1002,231 @@ namespace KustoAdbc.Substrait
                 }
             }
 
-            w.Write(Utf8KqlWriter.FuncPrefix);
-            w.WriteInt32(functionRef);
-            w.Write((byte)'(');
+            // Resolve function name from plan extensions
+            if (_functionAnchors.TryGetValue(functionRef, out string? funcSignature)
+                && KqlFunctionMap.TryGet(funcSignature, out var mapping))
+            {
+                WriteResolvedFunction(span, w, mapping, argPositions);
+            }
+            else
+            {
+                // Fallback: emit func_N(args) for unresolved functions
+                w.Write(Utf8KqlWriter.FuncPrefix);
+                w.WriteInt32(functionRef);
+                w.Write((byte)'(');
+                WriteArgList(span, w, argPositions);
+                w.Write((byte)')');
+            }
+        }
+
+        void WriteResolvedFunction(ReadOnlySpan<byte> span, Utf8KqlWriter w,
+            KqlFunctionMapping mapping, List<(int start, int len)> argPositions)
+        {
+            switch (mapping.Kind)
+            {
+                case KqlFunctionKind.InfixOperator:
+                    // arg0 OP arg1 — KqlName includes surrounding spaces
+                    if (argPositions.Count >= 2)
+                    {
+                        WriteSingleArg(span, w, argPositions[0]);
+                        w.Write(mapping.KqlName);
+                        WriteSingleArg(span, w, argPositions[1]);
+                    }
+                    break;
+
+                case KqlFunctionKind.PrefixOperator:
+                    // OP (arg0) — parenthesize to ensure correct precedence
+                    w.Write(mapping.KqlName);
+                    w.Write((byte)'(');
+                    if (argPositions.Count >= 1)
+                        WriteSingleArg(span, w, argPositions[0]);
+                    w.Write((byte)')');
+                    break;
+
+                case KqlFunctionKind.Function:
+                case KqlFunctionKind.AggregateFunction:
+                    // func(args)
+                    w.Write(mapping.KqlName);
+                    w.Write((byte)'(');
+                    WriteArgList(span, w, argPositions);
+                    w.Write((byte)')');
+                    break;
+
+                case KqlFunctionKind.Special:
+                    WriteSpecialFunction(span, w, mapping.KqlName, argPositions);
+                    break;
+            }
+        }
+
+        void WriteSpecialFunction(ReadOnlySpan<byte> span, Utf8KqlWriter w,
+            byte[] specialKey, List<(int start, int len)> argPositions)
+        {
+            // Match on the special key to determine output format.
+            // specialKey is a UTF-8 encoded string like "is_null", "between", etc.
+            string key = Encoding.UTF8.GetString(specialKey);
+
+            switch (key)
+            {
+                case "is_null":
+                    // isnull(arg0)
+                    w.Write(IsNull);
+                    w.Write((byte)'(');
+                    if (argPositions.Count >= 1) WriteSingleArg(span, w, argPositions[0]);
+                    w.Write((byte)')');
+                    break;
+
+                case "is_not_null":
+                    // isnotnull(arg0)
+                    w.Write(IsNotNull);
+                    w.Write((byte)'(');
+                    if (argPositions.Count >= 1) WriteSingleArg(span, w, argPositions[0]);
+                    w.Write((byte)')');
+                    break;
+
+                case "between":
+                    // arg0 between (arg1 .. arg2)
+                    if (argPositions.Count >= 3)
+                    {
+                        WriteSingleArg(span, w, argPositions[0]);
+                        w.Write(BetweenOp);
+                        w.Write((byte)'(');
+                        WriteSingleArg(span, w, argPositions[1]);
+                        w.Write(DotDot);
+                        WriteSingleArg(span, w, argPositions[2]);
+                        w.Write((byte)')');
+                    }
+                    break;
+
+                case "count_star":
+                    w.Write(Utf8KqlWriter.CountFunc);
+                    break;
+
+                case "like":
+                    // arg0 matches regex arg1  (KQL uses matches regex for LIKE patterns)
+                    if (argPositions.Count >= 2)
+                    {
+                        WriteSingleArg(span, w, argPositions[0]);
+                        w.Write(MatchesRegex);
+                        WriteSingleArg(span, w, argPositions[1]);
+                    }
+                    break;
+
+                case "starts_with":
+                    // arg0 startswith arg1
+                    if (argPositions.Count >= 2)
+                    {
+                        WriteSingleArg(span, w, argPositions[0]);
+                        w.Write(StartsWith);
+                        WriteSingleArg(span, w, argPositions[1]);
+                    }
+                    break;
+
+                case "ends_with":
+                    // arg0 endswith arg1
+                    if (argPositions.Count >= 2)
+                    {
+                        WriteSingleArg(span, w, argPositions[0]);
+                        w.Write(EndsWith);
+                        WriteSingleArg(span, w, argPositions[1]);
+                    }
+                    break;
+
+                case "contains":
+                    // arg0 contains arg1
+                    if (argPositions.Count >= 2)
+                    {
+                        WriteSingleArg(span, w, argPositions[0]);
+                        w.Write(ContainsOp);
+                        WriteSingleArg(span, w, argPositions[1]);
+                    }
+                    break;
+
+                case "xor":
+                    // (arg0 and not arg1) or (not arg0 and arg1)
+                    // Simplified: arg0 != arg1 for booleans
+                    if (argPositions.Count >= 2)
+                    {
+                        WriteSingleArg(span, w, argPositions[0]);
+                        w.Write(NotEqualOp);
+                        WriteSingleArg(span, w, argPositions[1]);
+                    }
+                    break;
+
+                case "is_not_nan":
+                    // not isnan(arg0)
+                    w.Write(NotPrefix);
+                    w.Write(IsNan);
+                    w.Write((byte)'(');
+                    if (argPositions.Count >= 1) WriteSingleArg(span, w, argPositions[0]);
+                    w.Write((byte)')');
+                    break;
+
+                case "nullif":
+                    // iif(arg0 == arg1, dynamic(null), arg0)
+                    if (argPositions.Count >= 2)
+                    {
+                        w.Write(Utf8KqlWriter.Iif);
+                        WriteSingleArg(span, w, argPositions[0]);
+                        w.Write(EqualOp);
+                        WriteSingleArg(span, w, argPositions[1]);
+                        w.Write(Utf8KqlWriter.Comma);
+                        w.Write((byte)' ');
+                        w.Write(Utf8KqlWriter.DynamicNull);
+                        w.Write(Utf8KqlWriter.Comma);
+                        w.Write((byte)' ');
+                        WriteSingleArg(span, w, argPositions[0]);
+                        w.Write((byte)')');
+                    }
+                    break;
+
+                case "regexp_match":
+                    // arg0 matches regex arg1
+                    if (argPositions.Count >= 2)
+                    {
+                        WriteSingleArg(span, w, argPositions[0]);
+                        w.Write(MatchesRegex);
+                        WriteSingleArg(span, w, argPositions[1]);
+                    }
+                    break;
+
+                default:
+                    // Unknown special: emit as function call
+                    w.Write(specialKey);
+                    w.Write((byte)'(');
+                    WriteArgList(span, w, argPositions);
+                    w.Write((byte)')');
+                    break;
+            }
+        }
+
+        void WriteSingleArg(ReadOnlySpan<byte> span, Utf8KqlWriter w, (int start, int len) arg)
+        {
+            int p = arg.start;
+            WriteFunctionArgument(span, ref p, arg.start + arg.len, w);
+        }
+
+        void WriteArgList(ReadOnlySpan<byte> span, Utf8KqlWriter w, List<(int start, int len)> argPositions)
+        {
             for (int i = 0; i < argPositions.Count; i++)
             {
                 if (i > 0) w.Write(Utf8KqlWriter.Comma);
-                int p = argPositions[i].start;
-                WriteFunctionArgument(span, ref p, argPositions[i].start + argPositions[i].len, w);
+                WriteSingleArg(span, w, argPositions[i]);
             }
-            w.Write((byte)')');
         }
+
+        // UTF-8 constants for special function output
+        static readonly byte[] IsNull = "isnull"u8.ToArray();
+        static readonly byte[] IsNotNull = "isnotnull"u8.ToArray();
+        static readonly byte[] IsNan = "isnan"u8.ToArray();
+        static readonly byte[] BetweenOp = " between "u8.ToArray();
+        static readonly byte[] DotDot = " .. "u8.ToArray();
+        static readonly byte[] MatchesRegex = " matches regex "u8.ToArray();
+        static readonly byte[] StartsWith = " startswith "u8.ToArray();
+        static readonly byte[] EndsWith = " endswith "u8.ToArray();
+        static readonly byte[] ContainsOp = " contains "u8.ToArray();
+        static readonly byte[] NotEqualOp = " != "u8.ToArray();
+        static readonly byte[] EqualOp = " == "u8.ToArray();
+        static readonly byte[] NotPrefix = "not "u8.ToArray();
 
         void WriteFunctionArgument(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {

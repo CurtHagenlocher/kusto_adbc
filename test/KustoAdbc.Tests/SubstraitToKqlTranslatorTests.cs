@@ -163,6 +163,41 @@ namespace KustoAdbc.Tests
             public static byte[] Plan(byte[] planRel)
                 => LenDel(3, planRel); // Plan.relations(3)
 
+            // Plan with extension declarations
+            // SimpleExtensionDeclaration.extension_function: urn_ref(4), anchor(2), name(3)
+            public static byte[] ExtFunc(int urnRef, int anchor, string name)
+            {
+                var inner = Cat(VarField(4, urnRef), VarField(2, anchor), StrField(3, name));
+                return LenDel(3, inner); // ExtensionFunction is oneof field 3
+            }
+
+            // SimpleExtensionURN: anchor(1), uri(2)
+            public static byte[] ExtUri(int anchor, string uri)
+                => Cat(VarField(1, anchor), StrField(2, uri));
+
+            // Build a plan with extensions and relations
+            public static byte[] PlanWithExtensions(byte[][] extUris, byte[][] extDecls, byte[] planRel)
+            {
+                var parts = new System.Collections.Generic.List<byte[]>();
+                foreach (var uri in extUris) parts.Add(LenDel(8, uri));     // Plan.extension_urns = field 8
+                foreach (var decl in extDecls) parts.Add(LenDel(2, decl));  // Plan.extensions = field 2
+                parts.Add(LenDel(3, planRel));                              // Plan.relations = field 3
+                return Cat(parts.ToArray());
+            }
+
+            // ScalarFunction expression: function_reference(1), args(4)
+            public static byte[] ScalarFunc(int funcRef, params byte[][] args)
+            {
+                var parts = new System.Collections.Generic.List<byte[]> { VarField(1, funcRef) };
+                foreach (var arg in args)
+                {
+                    // Wrap each arg as FunctionArgument.value (field 2) = Expression
+                    parts.Add(LenDel(4, LenDel(2, arg)));
+                }
+                var inner = Cat(parts.ToArray());
+                return LenDel(3, inner); // Expression.scalar_function = field 3
+            }
+
             // Expressions
 
             public static byte[] FieldRef(int index)
@@ -482,6 +517,197 @@ namespace KustoAdbc.Tests
         {
             Assert.Throws<ArgumentException>(() => SubstraitToKqlTranslator.Translate(Array.Empty<byte>()));
             Assert.Throws<ArgumentException>(() => SubstraitToKqlTranslator.Translate(null!));
+        }
+
+        #endregion
+
+        #region Extension Function Resolution
+
+        /// <summary>
+        /// Helper: builds a complete plan with extensions, where the filter condition
+        /// uses a scalar function resolved via the extension declarations.
+        /// </summary>
+        static byte[] BuildPlanWithScalarFilter(string table, string funcSignature, int funcAnchor, byte[] scalarExpr)
+        {
+            var read = PB.Rel(1, PB.ReadRel(table));
+            var filter = PB.FilterRel(read, scalarExpr);
+            var rel = PB.Rel(2, filter);
+            var planRel = PB.PlanRel(rel);
+
+            return PB.PlanWithExtensions(
+                new[] { PB.ExtUri(1, "extension:io.substrait:functions_arithmetic") },
+                new[] { PB.ExtFunc(1, funcAnchor, funcSignature) },
+                planRel);
+        }
+
+        [Fact]
+        public void Add_TranslatesToInfixPlus()
+        {
+            // add(field0, 10) → $field0 + 10
+            var expr = PB.ScalarFunc(100, PB.FieldRef(0), PB.LitI32(10));
+            var plan = BuildPlanWithScalarFilter("T", "add:i32_i32", 100, expr);
+
+            string kql = SubstraitToKqlTranslator.Translate(plan);
+            AssertValidKql(kql);
+            AssertKqlEqual("T | where $field0 + 10", kql);
+        }
+
+        [Fact]
+        public void Subtract_TranslatesToInfixMinus()
+        {
+            var expr = PB.ScalarFunc(101, PB.FieldRef(0), PB.LitI32(5));
+            var plan = BuildPlanWithScalarFilter("T", "subtract:i32_i32", 101, expr);
+
+            string kql = SubstraitToKqlTranslator.Translate(plan);
+            AssertKqlEqual("T | where $field0 - 5", kql);
+        }
+
+        [Fact]
+        public void Equal_TranslatesToDoubleEquals()
+        {
+            var expr = PB.ScalarFunc(200, PB.FieldRef(0), PB.LitStr("hello"));
+            var plan = PB.PlanWithExtensions(
+                new[] { PB.ExtUri(1, "extension:io.substrait:functions_comparison") },
+                new[] { PB.ExtFunc(1, 200, "equal:any_any") },
+                PB.PlanRel(PB.Rel(2, PB.FilterRel(PB.Rel(1, PB.ReadRel("T")), expr))));
+
+            string kql = SubstraitToKqlTranslator.Translate(plan);
+            AssertKqlEqual("T | where $field0 == 'hello'", kql);
+        }
+
+        [Fact]
+        public void LessThan_TranslatesToLtOperator()
+        {
+            var expr = PB.ScalarFunc(201, PB.FieldRef(0), PB.LitI32(100));
+            var plan = BuildPlanWithScalarFilter("T", "lt:i32_i32", 201, expr);
+
+            string kql = SubstraitToKqlTranslator.Translate(plan);
+            AssertKqlEqual("T | where $field0 < 100", kql);
+        }
+
+        [Fact]
+        public void And_TranslatesToInfixAnd()
+        {
+            // and(lt(field0, 100), gt(field1, 0))
+            // Need two function declarations
+            var lt = PB.ScalarFunc(300, PB.FieldRef(0), PB.LitI32(100));
+            var gt = PB.ScalarFunc(301, PB.FieldRef(1), PB.LitI32(0));
+            var andExpr = PB.ScalarFunc(302, lt, gt);
+
+            var read = PB.Rel(1, PB.ReadRel("T"));
+            var filter = PB.FilterRel(read, andExpr);
+            var rel = PB.Rel(2, filter);
+            var planRel = PB.PlanRel(rel);
+
+            var plan = PB.PlanWithExtensions(
+                new[] { PB.ExtUri(1, "extension:io.substrait:functions_comparison"),
+                        PB.ExtUri(2, "extension:io.substrait:functions_boolean") },
+                new[] { PB.ExtFunc(1, 300, "lt:i32_i32"),
+                        PB.ExtFunc(1, 301, "gt:i32_i32"),
+                        PB.ExtFunc(2, 302, "and:bool_bool") },
+                planRel);
+
+            string kql = SubstraitToKqlTranslator.Translate(plan);
+            AssertValidKql(kql);
+            AssertKqlEqual("T | where $field0 < 100 and $field1 > 0", kql);
+        }
+
+        [Fact]
+        public void Not_TranslatesToPrefixNot()
+        {
+            var inner = PB.ScalarFunc(400, PB.FieldRef(0), PB.LitI32(0));
+            var notExpr = PB.ScalarFunc(401, inner);
+
+            var plan = PB.PlanWithExtensions(
+                new[] { PB.ExtUri(1, "extension:io.substrait:functions_comparison"),
+                        PB.ExtUri(2, "extension:io.substrait:functions_boolean") },
+                new[] { PB.ExtFunc(1, 400, "equal:i32_i32"),
+                        PB.ExtFunc(2, 401, "not:bool") },
+                PB.PlanRel(PB.Rel(2, PB.FilterRel(PB.Rel(1, PB.ReadRel("T")), notExpr))));
+
+            string kql = SubstraitToKqlTranslator.Translate(plan);
+            AssertValidKql(kql);
+            AssertKqlEqual("T | where not ($field0 == 0)", kql);
+        }
+
+        [Fact]
+        public void Strlen_TranslatesToFunctionCall()
+        {
+            var expr = PB.ScalarFunc(500, PB.FieldRef(0));
+
+            var plan = PB.PlanWithExtensions(
+                new[] { PB.ExtUri(1, "extension:io.substrait:functions_string") },
+                new[] { PB.ExtFunc(1, 500, "char_length:str") },
+                PB.PlanRel(PB.Rel(2, PB.FilterRel(PB.Rel(1, PB.ReadRel("T")), expr))));
+
+            string kql = SubstraitToKqlTranslator.Translate(plan);
+            AssertValidKql(kql);
+            AssertKqlEqual("T | where strlen($field0)", kql);
+        }
+
+        [Fact]
+        public void IsNull_TranslatesToIsnull()
+        {
+            var expr = PB.ScalarFunc(600, PB.FieldRef(0));
+
+            var plan = PB.PlanWithExtensions(
+                new[] { PB.ExtUri(1, "extension:io.substrait:functions_comparison") },
+                new[] { PB.ExtFunc(1, 600, "is_null:any") },
+                PB.PlanRel(PB.Rel(2, PB.FilterRel(PB.Rel(1, PB.ReadRel("T")), expr))));
+
+            string kql = SubstraitToKqlTranslator.Translate(plan);
+            AssertValidKql(kql);
+            AssertKqlEqual("T | where isnull($field0)", kql);
+        }
+
+        [Fact]
+        public void UnresolvedFunction_FallsBackToFuncN()
+        {
+            // A scalar function with no matching extension declaration
+            // should fall back to func_N(args)
+            var expr = PB.ScalarFunc(999, PB.FieldRef(0));
+            var plan = BuildPlan(2, PB.FilterRel(PB.Rel(1, PB.ReadRel("T")), expr));
+
+            string kql = SubstraitToKqlTranslator.Translate(plan);
+            Assert.Contains("func_999", kql);
+        }
+
+        [Fact]
+        public void Strcat_TranslatesToFunctionCall()
+        {
+            var expr = PB.ScalarFunc(700, PB.FieldRef(0), PB.LitStr("_suffix"));
+
+            var plan = PB.PlanWithExtensions(
+                new[] { PB.ExtUri(1, "extension:io.substrait:functions_string") },
+                new[] { PB.ExtFunc(1, 700, "concat:str_str") },
+                PB.PlanRel(PB.Rel(2, PB.FilterRel(PB.Rel(1, PB.ReadRel("T")), expr))));
+
+            string kql = SubstraitToKqlTranslator.Translate(plan);
+            AssertValidKql(kql);
+            AssertKqlEqual("T | where strcat($field0, '_suffix')", kql);
+        }
+
+        [Fact]
+        public void Multiply_TranslatesToInfixStar()
+        {
+            var expr = PB.ScalarFunc(800, PB.FieldRef(0), PB.FieldRef(1));
+            var plan = BuildPlanWithScalarFilter("T", "multiply:fp64_fp64", 800, expr);
+
+            string kql = SubstraitToKqlTranslator.Translate(plan);
+            AssertKqlEqual("T | where $field0 * $field1", kql);
+        }
+
+        [Fact]
+        public void CountStar_TranslatesToCount()
+        {
+            var expr = PB.ScalarFunc(900);
+            var plan = PB.PlanWithExtensions(
+                new[] { PB.ExtUri(1, "extension:io.substrait:functions_aggregate_generic") },
+                new[] { PB.ExtFunc(1, 900, "count_star:") },
+                PB.PlanRel(PB.Rel(2, PB.FilterRel(PB.Rel(1, PB.ReadRel("T")), expr))));
+
+            string kql = SubstraitToKqlTranslator.Translate(plan);
+            Assert.Contains("count()", kql);
         }
 
         #endregion

@@ -66,19 +66,248 @@ namespace KustoAdbc
             string? columnNamePattern)
         {
             ThrowIfDisposed();
-            return GetObjectsImpl(depth, tableNamePattern, columnNamePattern);
+            return GetObjectsImpl(depth, catalogPattern, dbSchemaPattern, tableNamePattern, tableTypes, columnNamePattern);
         }
 
         IArrowArrayStream GetObjectsImpl(
             GetObjectsDepth depth,
+            string? catalogPattern,
+            string? dbSchemaPattern,
             string? tableNamePattern,
+            IReadOnlyList<string>? tableTypes,
             string? columnNamePattern)
         {
-            // For now, return a minimal implementation using .show tables
-            // Full implementation with nested catalog/schema structure is a follow-up
-            var batches = new List<RecordBatch>();
+            // Kusto mapping:
+            //   Catalog  = cluster endpoint
+            //   DbSchema = database name (the one we're connected to)
+            //   Table    = tables from .show tables
+            //   Column   = columns from .show table T cslschema
 
-            // Execute ".show tables" to get table list
+            string catalogName = _endpoint;
+
+            // Check catalog filter
+            if (catalogPattern != null && !MatchesPattern(catalogName, catalogPattern))
+            {
+                // No matching catalogs — return empty result
+                return BuildEmptyGetObjects();
+            }
+
+            // Check db schema filter
+            if (dbSchemaPattern != null && !MatchesPattern(_database, dbSchemaPattern))
+            {
+                return BuildGetObjectsResult(catalogName, depth, null);
+            }
+
+            // Build the nested structure based on requested depth
+            var catalogNameBuilder = new StringArray.Builder();
+            var catalogDbSchemas = new List<IArrowArray?>();
+            catalogNameBuilder.Append(catalogName);
+
+            if (depth == GetObjectsDepth.Catalogs)
+            {
+                catalogDbSchemas.Add(null);
+            }
+            else
+            {
+                catalogDbSchemas.Add(BuildDbSchemas(depth, tableNamePattern, tableTypes, columnNamePattern));
+            }
+
+            var dataArrays = new IArrowArray[]
+            {
+                catalogNameBuilder.Build(),
+                ArrowListArrayHelper.BuildListArray(catalogDbSchemas, new StructType(StandardSchemas.DbSchemaSchema)),
+            };
+
+            var batch = new RecordBatch(StandardSchemas.GetObjectsSchema, dataArrays, 1);
+            return new SingleBatchStream(StandardSchemas.GetObjectsSchema, batch);
+        }
+
+        StructArray BuildDbSchemas(
+            GetObjectsDepth depth,
+            string? tableNamePattern,
+            IReadOnlyList<string>? tableTypes,
+            string? columnNamePattern)
+        {
+            var dbSchemaNameBuilder = new StringArray.Builder();
+            var dbSchemaTables = new List<IArrowArray?>();
+            var validityBuilder = new ArrowBuffer.BitmapBuilder();
+
+            dbSchemaNameBuilder.Append(_database);
+            validityBuilder.Append(true);
+
+            if (depth == GetObjectsDepth.DbSchemas)
+            {
+                dbSchemaTables.Add(null);
+            }
+            else
+            {
+                dbSchemaTables.Add(BuildTables(depth, tableNamePattern, tableTypes, columnNamePattern));
+            }
+
+            var dataArrays = new IArrowArray[]
+            {
+                dbSchemaNameBuilder.Build(),
+                ArrowListArrayHelper.BuildListArray(dbSchemaTables, new StructType(StandardSchemas.TableSchema)),
+            };
+
+            return new StructArray(new StructType(StandardSchemas.DbSchemaSchema), 1, dataArrays, validityBuilder.Build());
+        }
+
+        StructArray BuildTables(
+            GetObjectsDepth depth,
+            string? tableNamePattern,
+            IReadOnlyList<string>? tableTypes,
+            string? columnNamePattern)
+        {
+            // Fetch table list from Kusto
+            var tables = FetchTableList();
+
+            var tableNameBuilder = new StringArray.Builder();
+            var tableTypeBuilder = new StringArray.Builder();
+            var tableColumns = new List<IArrowArray?>();
+            var tableConstraints = new List<IArrowArray?>();
+            var validityBuilder = new ArrowBuffer.BitmapBuilder();
+            int length = 0;
+
+            foreach (var (name, type) in tables)
+            {
+                // Apply table name filter
+                if (tableNamePattern != null && !MatchesPattern(name, tableNamePattern))
+                    continue;
+
+                // Apply table type filter
+                if (tableTypes != null && !ContainsIgnoreCase(tableTypes, type))
+                    continue;
+
+                tableNameBuilder.Append(name);
+                tableTypeBuilder.Append(type);
+                validityBuilder.Append(true);
+                length++;
+
+                // Columns
+                if (depth == GetObjectsDepth.Tables)
+                {
+                    tableColumns.Add(null);
+                }
+                else
+                {
+                    tableColumns.Add(BuildColumns(name, columnNamePattern));
+                }
+
+                // Constraints — Kusto doesn't have traditional constraints
+                tableConstraints.Add(null);
+            }
+
+            var dataArrays = new IArrowArray[]
+            {
+                tableNameBuilder.Build(),
+                tableTypeBuilder.Build(),
+                ArrowListArrayHelper.BuildListArray(tableColumns, new StructType(StandardSchemas.ColumnSchema)),
+                ArrowListArrayHelper.BuildListArray(tableConstraints, new StructType(StandardSchemas.ConstraintSchema)),
+            };
+
+            return new StructArray(new StructType(StandardSchemas.TableSchema), length, dataArrays, validityBuilder.Build());
+        }
+
+        StructArray BuildColumns(string tableName, string? columnNamePattern)
+        {
+            // Reuse our existing schema parsing
+            Schema tableSchema;
+            try
+            {
+                tableSchema = GetTableSchema(null, null, tableName);
+            }
+            catch
+            {
+                // If we can't get the schema, return empty columns
+                return BuildEmptyColumns();
+            }
+
+            var columnNameBuilder = new StringArray.Builder();
+            var ordinalBuilder = new Int32Array.Builder();
+            var remarksBuilder = new StringArray.Builder();
+            var xdbcDataTypeBuilder = new Int16Array.Builder();
+            var xdbcTypeNameBuilder = new StringArray.Builder();
+            var xdbcColumnSizeBuilder = new Int32Array.Builder();
+            var xdbcDecimalDigitsBuilder = new Int16Array.Builder();
+            var xdbcNumPrecRadixBuilder = new Int16Array.Builder();
+            var xdbcNullableBuilder = new Int16Array.Builder();
+            var xdbcColumnDefBuilder = new StringArray.Builder();
+            var xdbcSqlDataTypeBuilder = new Int16Array.Builder();
+            var xdbcDatetimeSubBuilder = new Int16Array.Builder();
+            var xdbcCharOctetLengthBuilder = new Int32Array.Builder();
+            var xdbcIsNullableBuilder = new StringArray.Builder();
+            var xdbcScopeCatalogBuilder = new StringArray.Builder();
+            var xdbcScopeSchemaBuilder = new StringArray.Builder();
+            var xdbcScopeTableBuilder = new StringArray.Builder();
+            var xdbcIsAutoIncrementBuilder = new BooleanArray.Builder();
+            var xdbcIsGeneratedColumnBuilder = new BooleanArray.Builder();
+            var validityBuilder = new ArrowBuffer.BitmapBuilder();
+            int length = 0;
+
+            for (int i = 0; i < tableSchema.FieldsList.Count; i++)
+            {
+                var field = tableSchema.FieldsList[i];
+
+                if (columnNamePattern != null && !MatchesPattern(field.Name, columnNamePattern))
+                    continue;
+
+                columnNameBuilder.Append(field.Name);
+                ordinalBuilder.Append(i + 1); // 1-based ordinal
+                remarksBuilder.AppendNull();
+                xdbcDataTypeBuilder.AppendNull();
+                xdbcTypeNameBuilder.Append(ArrowTypeToKustoTypeName(field.DataType));
+                xdbcColumnSizeBuilder.AppendNull();
+                xdbcDecimalDigitsBuilder.AppendNull();
+                xdbcNumPrecRadixBuilder.AppendNull();
+                xdbcNullableBuilder.Append((short)(field.IsNullable ? 1 : 0));
+                xdbcColumnDefBuilder.AppendNull();
+                xdbcSqlDataTypeBuilder.AppendNull();
+                xdbcDatetimeSubBuilder.AppendNull();
+                xdbcCharOctetLengthBuilder.AppendNull();
+                xdbcIsNullableBuilder.Append(field.IsNullable ? "YES" : "NO");
+                xdbcScopeCatalogBuilder.AppendNull();
+                xdbcScopeSchemaBuilder.AppendNull();
+                xdbcScopeTableBuilder.AppendNull();
+                xdbcIsAutoIncrementBuilder.Append(false);
+                xdbcIsGeneratedColumnBuilder.Append(false);
+                validityBuilder.Append(true);
+                length++;
+            }
+
+            var dataArrays = new IArrowArray[]
+            {
+                columnNameBuilder.Build(),
+                ordinalBuilder.Build(),
+                remarksBuilder.Build(),
+                xdbcDataTypeBuilder.Build(),
+                xdbcTypeNameBuilder.Build(),
+                xdbcColumnSizeBuilder.Build(),
+                xdbcDecimalDigitsBuilder.Build(),
+                xdbcNumPrecRadixBuilder.Build(),
+                xdbcNullableBuilder.Build(),
+                xdbcColumnDefBuilder.Build(),
+                xdbcSqlDataTypeBuilder.Build(),
+                xdbcDatetimeSubBuilder.Build(),
+                xdbcCharOctetLengthBuilder.Build(),
+                xdbcIsNullableBuilder.Build(),
+                xdbcScopeCatalogBuilder.Build(),
+                xdbcScopeSchemaBuilder.Build(),
+                xdbcScopeTableBuilder.Build(),
+                xdbcIsAutoIncrementBuilder.Build(),
+                xdbcIsGeneratedColumnBuilder.Build(),
+            };
+
+            return new StructArray(new StructType(StandardSchemas.ColumnSchema), length, dataArrays, validityBuilder.Build());
+        }
+
+        StructArray BuildEmptyColumns()
+        {
+            return BuildColumns("__nonexistent__", "____nomatch____");
+        }
+
+        List<(string name, string type)> FetchTableList()
+        {
             var task = Task.Run(async () =>
             {
                 var (reader, lifetime) = await HttpClient.ExecuteManagementAsync(".show tables").ConfigureAwait(false);
@@ -90,7 +319,123 @@ namespace KustoAdbc
             });
 
             var batch = task.GetAwaiter().GetResult();
-            return new SingleBatchStream(batch.Schema, batch);
+            var result = new List<(string name, string type)>();
+
+            // .show tables returns: TableName, DatabaseName, Folder, DocString
+            int nameCol = -1;
+            for (int i = 0; i < batch.Schema.FieldsList.Count; i++)
+            {
+                if (batch.Schema.FieldsList[i].Name == "TableName")
+                    nameCol = i;
+            }
+
+            if (nameCol >= 0)
+            {
+                var nameArray = (StringArray)batch.Column(nameCol);
+                for (int i = 0; i < batch.Length; i++)
+                {
+                    string? name = nameArray.GetString(i);
+                    if (name != null)
+                        result.Add((name, "Table"));
+                }
+            }
+
+            return result;
+        }
+
+        IArrowArrayStream BuildEmptyGetObjects()
+        {
+            var catalogNameBuilder = new StringArray.Builder();
+            var catalogDbSchemas = new List<IArrowArray?>();
+            var dataArrays = new IArrowArray[]
+            {
+                catalogNameBuilder.Build(),
+                ArrowListArrayHelper.BuildListArray(catalogDbSchemas, new StructType(StandardSchemas.DbSchemaSchema)),
+            };
+            var batch = new RecordBatch(StandardSchemas.GetObjectsSchema, dataArrays, 0);
+            return new SingleBatchStream(StandardSchemas.GetObjectsSchema, batch);
+        }
+
+        IArrowArrayStream BuildGetObjectsResult(string catalogName, GetObjectsDepth depth, StructArray? dbSchemas)
+        {
+            var catalogNameBuilder = new StringArray.Builder();
+            var catalogDbSchemasList = new List<IArrowArray?>();
+            catalogNameBuilder.Append(catalogName);
+            catalogDbSchemasList.Add(dbSchemas);
+
+            var dataArrays = new IArrowArray[]
+            {
+                catalogNameBuilder.Build(),
+                ArrowListArrayHelper.BuildListArray(catalogDbSchemasList, new StructType(StandardSchemas.DbSchemaSchema)),
+            };
+
+            var batch = new RecordBatch(StandardSchemas.GetObjectsSchema, dataArrays, 1);
+            return new SingleBatchStream(StandardSchemas.GetObjectsSchema, batch);
+        }
+
+        static string ArrowTypeToKustoTypeName(IArrowType arrowType)
+        {
+            return arrowType switch
+            {
+                StringType => "string",
+                Int32Type => "int",
+                Int64Type => "long",
+                DoubleType => "real",
+                BooleanType => "bool",
+                TimestampType => "datetime",
+                DurationType => "timespan",
+                _ => "dynamic",
+            };
+        }
+
+        internal static bool MatchesPattern(string value, string pattern)
+        {
+            // Simple pattern matching: supports SQL LIKE-style % and _ wildcards
+            if (pattern == "%") return true;
+            if (!pattern.Contains('%') && !pattern.Contains('_'))
+                return string.Equals(value, pattern, StringComparison.OrdinalIgnoreCase);
+
+            // Convert to simple regex-like matching
+            int pi = 0, vi = 0;
+            while (pi < pattern.Length && vi < value.Length)
+            {
+                char pc = pattern[pi];
+                if (pc == '%')
+                {
+                    pi++;
+                    if (pi == pattern.Length) return true; // trailing %
+                    while (vi < value.Length)
+                    {
+                        if (MatchesPattern(value.Substring(vi), pattern.Substring(pi)))
+                            return true;
+                        vi++;
+                    }
+                    return false;
+                }
+                else if (pc == '_')
+                {
+                    pi++;
+                    vi++;
+                }
+                else
+                {
+                    if (char.ToLowerInvariant(pc) != char.ToLowerInvariant(value[vi]))
+                        return false;
+                    pi++;
+                    vi++;
+                }
+            }
+            // Consume trailing %
+            while (pi < pattern.Length && pattern[pi] == '%') pi++;
+            return pi == pattern.Length && vi == value.Length;
+        }
+
+        static bool ContainsIgnoreCase(IReadOnlyList<string> list, string value)
+        {
+            for (int i = 0; i < list.Count; i++)
+                if (string.Equals(list[i], value, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            return false;
         }
 
         public override Schema GetTableSchema(string? catalog, string? dbSchema, string tableName)

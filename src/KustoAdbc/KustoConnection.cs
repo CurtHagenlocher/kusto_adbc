@@ -112,7 +112,7 @@ namespace KustoAdbc
             return task.GetAwaiter().GetResult();
         }
 
-        static Schema ParseTableSchema(RecordBatch batch)
+        internal static Schema ParseTableSchema(RecordBatch batch)
         {
             // The ".show table T cslschema" command returns a table with a "Schema" column
             // containing a comma-separated list of "ColumnName:ColumnType" pairs.

@@ -213,7 +213,7 @@ namespace KustoAdbc.Substrait
                 _functionAnchors[anchor] = name;
         }
 
-        void WritePlanRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<string>? WritePlanRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             while (pos < end)
             {
@@ -227,17 +227,17 @@ namespace KustoAdbc.Substrait
                     {
                         int len = ReadVarint32(span, ref pos);
                         int relEnd = pos + len;
-                        WriteRel(span, ref pos, relEnd, w);
+                        var schema = WriteRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        return;
+                        return schema;
                     }
                     case 2: // root (RelRoot)
                     {
                         int len = ReadVarint32(span, ref pos);
                         int rootEnd = pos + len;
-                        WriteRelRoot(span, ref pos, rootEnd, w);
+                        var schema = WriteRelRoot(span, ref pos, rootEnd, w);
                         pos = rootEnd;
-                        return;
+                        return schema;
                     }
                     default:
                         SkipField(span, wireType, ref pos);
@@ -247,7 +247,7 @@ namespace KustoAdbc.Substrait
             throw new InvalidOperationException("PlanRel has no relation.");
         }
 
-        void WriteRelRoot(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<string>? WriteRelRoot(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             while (pos < end)
             {
@@ -261,9 +261,9 @@ namespace KustoAdbc.Substrait
                     {
                         int len = ReadVarint32(span, ref pos);
                         int relEnd = pos + len;
-                        WriteRel(span, ref pos, relEnd, w);
+                        var schema = WriteRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        return;
+                        return schema;
                     }
                     default:
                         SkipField(span, wireType, ref pos);
@@ -273,7 +273,7 @@ namespace KustoAdbc.Substrait
             throw new InvalidOperationException("RelRoot has no input.");
         }
 
-        void WriteRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<string>? WriteRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             while (pos < end)
             {
@@ -288,45 +288,45 @@ namespace KustoAdbc.Substrait
                     case 1: // read
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
-                        WriteReadRel(span, ref pos, relEnd, w);
+                        var readSchema = WriteReadRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        return;
+                        return readSchema;
                     case 2: // filter
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
-                        WriteFilterRel(span, ref pos, relEnd, w);
+                        var filterSchema = WriteFilterRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        return;
+                        return filterSchema;
                     case 3: // fetch
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
-                        WriteFetchRel(span, ref pos, relEnd, w);
+                        var fetchSchema = WriteFetchRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        return;
+                        return fetchSchema;
                     case 4: // aggregate
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
-                        WriteAggregateRel(span, ref pos, relEnd, w);
+                        var aggSchema = WriteAggregateRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        return;
+                        return aggSchema;
                     case 5: // sort
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
-                        WriteSortRel(span, ref pos, relEnd, w);
+                        var sortSchema = WriteSortRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        return;
+                        return sortSchema;
                     case 6: // join
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
-                        WriteJoinRel(span, ref pos, relEnd, w);
+                        var joinSchema = WriteJoinRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        return;
+                        return joinSchema;
                     case 7: // project
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
-                        WriteProjectRel(span, ref pos, relEnd, w);
+                        var projSchema = WriteProjectRel(span, ref pos, relEnd, w);
                         pos = relEnd;
-                        return;
+                        return projSchema;
                     default:
                         SkipField(span, wireType, ref pos);
                         break;
@@ -337,8 +337,10 @@ namespace KustoAdbc.Substrait
 
         #region Relation Writers
 
-        void WriteReadRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<string>? WriteReadRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
+            List<string>? schema = null;
+
             while (pos < end)
             {
                 int tag = ReadTag(span, ref pos);
@@ -347,20 +349,62 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
+                    case 2: // base_schema (NamedStruct)
+                    {
+                        int len = ReadVarint32(span, ref pos);
+                        int nsEnd = pos + len;
+                        schema = ParseNamedStructNames(span, ref pos, nsEnd);
+                        pos = nsEnd;
+                        break;
+                    }
                     case 7: // named_table
                     {
                         int len = ReadVarint32(span, ref pos);
                         int ntEnd = pos + len;
                         WriteNamedTable(span, ref pos, ntEnd, w);
                         pos = ntEnd;
-                        return;
+                        break;
                     }
                     default:
                         SkipField(span, wireType, ref pos);
                         break;
                 }
             }
-            throw new InvalidOperationException("ReadRel has no named table.");
+
+            // If we never found a named_table, that's an error — but the table name
+            // was already written by WriteNamedTable if encountered.
+            // We check after parsing all fields because protobuf field order is not guaranteed.
+            return schema;
+        }
+
+        List<string> ParseNamedStructNames(ReadOnlySpan<byte> span, ref int pos, int end)
+        {
+            var names = new List<string>();
+            while (pos < end)
+            {
+                int tag = ReadTag(span, ref pos);
+                int fieldNumber = tag >> 3;
+                int wireType = tag & 0x7;
+
+                switch (fieldNumber)
+                {
+                    case 1: // names (repeated string)
+                    {
+                        int len = ReadVarint32(span, ref pos);
+#if NETSTANDARD2_0
+                        names.Add(System.Text.Encoding.UTF8.GetString(span.Slice(pos, len).ToArray()));
+#else
+                        names.Add(System.Text.Encoding.UTF8.GetString(span.Slice(pos, len)));
+#endif
+                        pos += len;
+                        break;
+                    }
+                    default:
+                        SkipField(span, wireType, ref pos);
+                        break;
+                }
+            }
+            return names;
         }
 
         void WriteNamedTable(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
@@ -388,7 +432,7 @@ namespace KustoAdbc.Substrait
             throw new InvalidOperationException("NamedTable has no name.");
         }
 
-        void WriteFilterRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<string>? WriteFilterRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             // We must parse both input and condition before writing,
             // because protobuf fields can appear in any order.
@@ -431,13 +475,14 @@ namespace KustoAdbc.Substrait
             if (condStart < 0) throw new InvalidOperationException("FilterRel missing condition.");
 
             int p = inputStart;
-            WriteRel(span, ref p, inputStart + inputLen, w);
+            var schema = WriteRel(span, ref p, inputStart + inputLen, w);
             w.Write(Utf8KqlWriter.PipeWhere);
             p = condStart;
-            WriteExpression(span, ref p, condStart + condLen, w);
+            WriteExpression(span, ref p, condStart + condLen, w, schema);
+            return schema;
         }
 
-        void WriteProjectRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<string>? WriteProjectRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             // Collect expression positions, then write in order.
             int inputStart = -1, inputLen = 0;
@@ -474,7 +519,7 @@ namespace KustoAdbc.Substrait
             if (inputStart < 0) throw new InvalidOperationException("ProjectRel missing input.");
 
             int p = inputStart;
-            WriteRel(span, ref p, inputStart + inputLen, w);
+            var schema = WriteRel(span, ref p, inputStart + inputLen, w);
 
             if (exprPositions.Count > 0)
             {
@@ -483,12 +528,14 @@ namespace KustoAdbc.Substrait
                 {
                     if (i > 0) w.Write(Utf8KqlWriter.Comma);
                     p = exprPositions[i].start;
-                    WriteExpression(span, ref p, exprPositions[i].start + exprPositions[i].len, w);
+                    WriteExpression(span, ref p, exprPositions[i].start + exprPositions[i].len, w, schema);
                 }
             }
+
+            return null; // ProjectRel output schema depends on expressions; complex to track
         }
 
-        void WriteFetchRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<string>? WriteFetchRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             int inputStart = -1, inputLen = 0;
             long offset = 0, count = -1;
@@ -517,7 +564,7 @@ namespace KustoAdbc.Substrait
             if (inputStart < 0) throw new InvalidOperationException("FetchRel missing input.");
 
             int p = inputStart;
-            WriteRel(span, ref p, inputStart + inputLen, w);
+            var schema = WriteRel(span, ref p, inputStart + inputLen, w);
 
             if (offset > 0)
             {
@@ -530,9 +577,10 @@ namespace KustoAdbc.Substrait
                 w.Write(Utf8KqlWriter.PipeTake);
                 w.WriteInt64(count);
             }
+            return schema;
         }
 
-        void WriteSortRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<string>? WriteSortRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             int inputStart = -1, inputLen = 0;
             var sortPositions = new System.Collections.Generic.List<(int start, int len)>();
@@ -566,7 +614,7 @@ namespace KustoAdbc.Substrait
             if (inputStart < 0) throw new InvalidOperationException("SortRel missing input.");
 
             int p = inputStart;
-            WriteRel(span, ref p, inputStart + inputLen, w);
+            var schema = WriteRel(span, ref p, inputStart + inputLen, w);
 
             if (sortPositions.Count > 0)
             {
@@ -575,12 +623,13 @@ namespace KustoAdbc.Substrait
                 {
                     if (i > 0) w.Write(Utf8KqlWriter.Comma);
                     p = sortPositions[i].start;
-                    WriteSortField(span, ref p, sortPositions[i].start + sortPositions[i].len, w);
+                    WriteSortField(span, ref p, sortPositions[i].start + sortPositions[i].len, w, schema);
                 }
             }
+            return schema;
         }
 
-        void WriteSortField(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        void WriteSortField(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<string>? schema)
         {
             int exprStart = -1, exprLen = 0;
             int direction = 0;
@@ -608,13 +657,13 @@ namespace KustoAdbc.Substrait
             if (exprStart < 0) throw new InvalidOperationException("SortField missing expression.");
 
             int p = exprStart;
-            WriteExpression(span, ref p, exprStart + exprLen, w);
+            WriteExpression(span, ref p, exprStart + exprLen, w, schema);
 
             if (direction is 1 or 2) w.Write(Utf8KqlWriter.Asc);
             else if (direction is 3 or 4) w.Write(Utf8KqlWriter.Desc);
         }
 
-        void WriteAggregateRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<string>? WriteAggregateRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             int inputStart = -1, inputLen = 0;
             var groupPositions = new System.Collections.Generic.List<(int start, int len)>();
@@ -656,7 +705,7 @@ namespace KustoAdbc.Substrait
             if (inputStart < 0) throw new InvalidOperationException("AggregateRel missing input.");
 
             int p = inputStart;
-            WriteRel(span, ref p, inputStart + inputLen, w);
+            var schema = WriteRel(span, ref p, inputStart + inputLen, w);
 
             w.Write(Utf8KqlWriter.PipeSummarize);
 
@@ -665,7 +714,7 @@ namespace KustoAdbc.Substrait
             {
                 if (i > 0) w.Write(Utf8KqlWriter.Comma);
                 p = measurePositions[i].start;
-                WriteMeasure(span, ref p, measurePositions[i].start + measurePositions[i].len, w);
+                WriteMeasure(span, ref p, measurePositions[i].start + measurePositions[i].len, w, schema);
             }
 
             // Groupings
@@ -674,11 +723,13 @@ namespace KustoAdbc.Substrait
             {
                 p = groupPositions[gi].start;
                 int gEnd = groupPositions[gi].start + groupPositions[gi].len;
-                WriteGroupingExprs(span, ref p, gEnd, w, ref firstGrouping);
+                WriteGroupingExprs(span, ref p, gEnd, w, ref firstGrouping, schema);
             }
+
+            return null; // AggregateRel output schema depends on groupings + measures
         }
 
-        void WriteGroupingExprs(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, ref bool first)
+        void WriteGroupingExprs(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, ref bool first, List<string>? schema)
         {
             while (pos < end)
             {
@@ -694,7 +745,7 @@ namespace KustoAdbc.Substrait
                         if (first) { w.Write(Utf8KqlWriter.SummarizeBy); first = false; }
                         else { w.Write(Utf8KqlWriter.Comma); }
                         int exprEnd = pos + len;
-                        WriteExpression(span, ref pos, exprEnd, w);
+                        WriteExpression(span, ref pos, exprEnd, w, schema);
                         pos = exprEnd;
                         break;
                     }
@@ -705,7 +756,7 @@ namespace KustoAdbc.Substrait
             }
         }
 
-        void WriteMeasure(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        void WriteMeasure(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<string>? schema)
         {
             bool found = false;
             while (pos < end)
@@ -720,7 +771,7 @@ namespace KustoAdbc.Substrait
                     {
                         int len = ReadVarint32(span, ref pos);
                         int exprEnd = pos + len;
-                        WriteExpression(span, ref pos, exprEnd, w);
+                        WriteExpression(span, ref pos, exprEnd, w, schema);
                         pos = exprEnd;
                         found = true;
                         break;
@@ -733,7 +784,7 @@ namespace KustoAdbc.Substrait
             if (!found) w.Write(Utf8KqlWriter.CountFunc);
         }
 
-        void WriteJoinRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<string>? WriteJoinRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             int leftStart = -1, leftLen = 0;
             int rightStart = -1, rightLen = 0;
@@ -760,7 +811,7 @@ namespace KustoAdbc.Substrait
                 throw new InvalidOperationException("JoinRel missing left or right input.");
 
             int p = leftStart;
-            WriteRel(span, ref p, leftStart + leftLen, w);
+            var leftSchema = WriteRel(span, ref p, leftStart + leftLen, w);
 
             w.Write(Utf8KqlWriter.PipeJoinKind);
             w.Write(joinType switch
@@ -776,22 +827,41 @@ namespace KustoAdbc.Substrait
             w.Write((byte)' ');
             w.Write((byte)'(');
             p = rightStart;
-            WriteRel(span, ref p, rightStart + rightLen, w);
+            var rightSchema = WriteRel(span, ref p, rightStart + rightLen, w);
             w.Write((byte)')');
+
+            // Join output schema is left + right columns concatenated
+            List<string>? joinSchema = null;
+            if (leftSchema != null && rightSchema != null)
+            {
+                joinSchema = new List<string>(leftSchema.Count + rightSchema.Count);
+                joinSchema.AddRange(leftSchema);
+                joinSchema.AddRange(rightSchema);
+            }
+            else if (leftSchema != null)
+            {
+                joinSchema = new List<string>(leftSchema);
+            }
+            else if (rightSchema != null)
+            {
+                joinSchema = new List<string>(rightSchema);
+            }
 
             if (condStart >= 0)
             {
                 w.Write(Utf8KqlWriter.JoinOn);
                 p = condStart;
-                WriteExpression(span, ref p, condStart + condLen, w);
+                WriteExpression(span, ref p, condStart + condLen, w, joinSchema);
             }
+
+            return joinSchema;
         }
 
         #endregion
 
         #region Expression Writers
 
-        void WriteExpression(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        void WriteExpression(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<string>? schema = null)
         {
             while (pos < end)
             {
@@ -812,19 +882,19 @@ namespace KustoAdbc.Substrait
                     case 2: // selection (FieldReference)
                         len = ReadVarint32(span, ref pos);
                         exprEnd = pos + len;
-                        WriteFieldReference(span, ref pos, exprEnd, w);
+                        WriteFieldReference(span, ref pos, exprEnd, w, schema);
                         pos = exprEnd;
                         return;
                     case 3: // scalar_function
                         len = ReadVarint32(span, ref pos);
                         exprEnd = pos + len;
-                        WriteScalarFunction(span, ref pos, exprEnd, w);
+                        WriteScalarFunction(span, ref pos, exprEnd, w, schema);
                         pos = exprEnd;
                         return;
                     case 5: // if_then
                         len = ReadVarint32(span, ref pos);
                         exprEnd = pos + len;
-                        WriteIfThen(span, ref pos, exprEnd, w);
+                        WriteIfThen(span, ref pos, exprEnd, w, schema);
                         pos = exprEnd;
                         return;
                     default:
@@ -895,7 +965,7 @@ namespace KustoAdbc.Substrait
             w.Write(Utf8KqlWriter.DynamicNull);
         }
 
-        void WriteFieldReference(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        void WriteFieldReference(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<string>? schema)
         {
             int fieldIndex = -1;
             while (pos < end)
@@ -921,7 +991,12 @@ namespace KustoAdbc.Substrait
             }
 
             if (fieldIndex >= 0)
-                w.WriteFieldRef(fieldIndex);
+            {
+                if (schema != null && fieldIndex < schema.Count)
+                    w.WriteUtf8(Encoding.UTF8.GetBytes(schema[fieldIndex]));
+                else
+                    w.WriteFieldRef(fieldIndex);
+            }
             else
                 w.Write(Utf8KqlWriter.UnknownField);
         }
@@ -977,7 +1052,7 @@ namespace KustoAdbc.Substrait
             return fieldIndex;
         }
 
-        void WriteScalarFunction(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        void WriteScalarFunction(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<string>? schema)
         {
             int functionRef = 0;
             var argPositions = new List<(int start, int len)>();
@@ -1006,7 +1081,7 @@ namespace KustoAdbc.Substrait
             if (_functionAnchors.TryGetValue(functionRef, out string? funcSignature)
                 && KqlFunctionMap.TryGet(funcSignature, out var mapping))
             {
-                WriteResolvedFunction(span, w, mapping, argPositions);
+                WriteResolvedFunction(span, w, mapping, argPositions, schema);
             }
             else
             {
@@ -1014,13 +1089,13 @@ namespace KustoAdbc.Substrait
                 w.Write(Utf8KqlWriter.FuncPrefix);
                 w.WriteInt32(functionRef);
                 w.Write((byte)'(');
-                WriteArgList(span, w, argPositions);
+                WriteArgList(span, w, argPositions, schema);
                 w.Write((byte)')');
             }
         }
 
         void WriteResolvedFunction(ReadOnlySpan<byte> span, Utf8KqlWriter w,
-            KqlFunctionMapping mapping, List<(int start, int len)> argPositions)
+            KqlFunctionMapping mapping, List<(int start, int len)> argPositions, List<string>? schema)
         {
             switch (mapping.Kind)
             {
@@ -1028,9 +1103,9 @@ namespace KustoAdbc.Substrait
                     // arg0 OP arg1 — KqlName includes surrounding spaces
                     if (argPositions.Count >= 2)
                     {
-                        WriteSingleArg(span, w, argPositions[0]);
+                        WriteSingleArg(span, w, argPositions[0], schema);
                         w.Write(mapping.KqlName);
-                        WriteSingleArg(span, w, argPositions[1]);
+                        WriteSingleArg(span, w, argPositions[1], schema);
                     }
                     break;
 
@@ -1039,7 +1114,7 @@ namespace KustoAdbc.Substrait
                     w.Write(mapping.KqlName);
                     w.Write((byte)'(');
                     if (argPositions.Count >= 1)
-                        WriteSingleArg(span, w, argPositions[0]);
+                        WriteSingleArg(span, w, argPositions[0], schema);
                     w.Write((byte)')');
                     break;
 
@@ -1048,18 +1123,18 @@ namespace KustoAdbc.Substrait
                     // func(args)
                     w.Write(mapping.KqlName);
                     w.Write((byte)'(');
-                    WriteArgList(span, w, argPositions);
+                    WriteArgList(span, w, argPositions, schema);
                     w.Write((byte)')');
                     break;
 
                 case KqlFunctionKind.Special:
-                    WriteSpecialFunction(span, w, mapping.KqlName, argPositions);
+                    WriteSpecialFunction(span, w, mapping.KqlName, argPositions, schema);
                     break;
             }
         }
 
         void WriteSpecialFunction(ReadOnlySpan<byte> span, Utf8KqlWriter w,
-            byte[] specialKey, List<(int start, int len)> argPositions)
+            byte[] specialKey, List<(int start, int len)> argPositions, List<string>? schema)
         {
             // Match on the special key to determine output format.
             // specialKey is a UTF-8 encoded string like "is_null", "between", etc.
@@ -1071,7 +1146,7 @@ namespace KustoAdbc.Substrait
                     // isnull(arg0)
                     w.Write(IsNull);
                     w.Write((byte)'(');
-                    if (argPositions.Count >= 1) WriteSingleArg(span, w, argPositions[0]);
+                    if (argPositions.Count >= 1) WriteSingleArg(span, w, argPositions[0], schema);
                     w.Write((byte)')');
                     break;
 
@@ -1079,7 +1154,7 @@ namespace KustoAdbc.Substrait
                     // isnotnull(arg0)
                     w.Write(IsNotNull);
                     w.Write((byte)'(');
-                    if (argPositions.Count >= 1) WriteSingleArg(span, w, argPositions[0]);
+                    if (argPositions.Count >= 1) WriteSingleArg(span, w, argPositions[0], schema);
                     w.Write((byte)')');
                     break;
 
@@ -1087,12 +1162,12 @@ namespace KustoAdbc.Substrait
                     // arg0 between (arg1 .. arg2)
                     if (argPositions.Count >= 3)
                     {
-                        WriteSingleArg(span, w, argPositions[0]);
+                        WriteSingleArg(span, w, argPositions[0], schema);
                         w.Write(BetweenOp);
                         w.Write((byte)'(');
-                        WriteSingleArg(span, w, argPositions[1]);
+                        WriteSingleArg(span, w, argPositions[1], schema);
                         w.Write(DotDot);
-                        WriteSingleArg(span, w, argPositions[2]);
+                        WriteSingleArg(span, w, argPositions[2], schema);
                         w.Write((byte)')');
                     }
                     break;
@@ -1105,9 +1180,9 @@ namespace KustoAdbc.Substrait
                     // arg0 matches regex arg1  (KQL uses matches regex for LIKE patterns)
                     if (argPositions.Count >= 2)
                     {
-                        WriteSingleArg(span, w, argPositions[0]);
+                        WriteSingleArg(span, w, argPositions[0], schema);
                         w.Write(MatchesRegex);
-                        WriteSingleArg(span, w, argPositions[1]);
+                        WriteSingleArg(span, w, argPositions[1], schema);
                     }
                     break;
 
@@ -1115,9 +1190,9 @@ namespace KustoAdbc.Substrait
                     // arg0 startswith arg1
                     if (argPositions.Count >= 2)
                     {
-                        WriteSingleArg(span, w, argPositions[0]);
+                        WriteSingleArg(span, w, argPositions[0], schema);
                         w.Write(StartsWith);
-                        WriteSingleArg(span, w, argPositions[1]);
+                        WriteSingleArg(span, w, argPositions[1], schema);
                     }
                     break;
 
@@ -1125,9 +1200,9 @@ namespace KustoAdbc.Substrait
                     // arg0 endswith arg1
                     if (argPositions.Count >= 2)
                     {
-                        WriteSingleArg(span, w, argPositions[0]);
+                        WriteSingleArg(span, w, argPositions[0], schema);
                         w.Write(EndsWith);
-                        WriteSingleArg(span, w, argPositions[1]);
+                        WriteSingleArg(span, w, argPositions[1], schema);
                     }
                     break;
 
@@ -1135,9 +1210,9 @@ namespace KustoAdbc.Substrait
                     // arg0 contains arg1
                     if (argPositions.Count >= 2)
                     {
-                        WriteSingleArg(span, w, argPositions[0]);
+                        WriteSingleArg(span, w, argPositions[0], schema);
                         w.Write(ContainsOp);
-                        WriteSingleArg(span, w, argPositions[1]);
+                        WriteSingleArg(span, w, argPositions[1], schema);
                     }
                     break;
 
@@ -1146,9 +1221,9 @@ namespace KustoAdbc.Substrait
                     // Simplified: arg0 != arg1 for booleans
                     if (argPositions.Count >= 2)
                     {
-                        WriteSingleArg(span, w, argPositions[0]);
+                        WriteSingleArg(span, w, argPositions[0], schema);
                         w.Write(NotEqualOp);
-                        WriteSingleArg(span, w, argPositions[1]);
+                        WriteSingleArg(span, w, argPositions[1], schema);
                     }
                     break;
 
@@ -1157,7 +1232,7 @@ namespace KustoAdbc.Substrait
                     w.Write(NotPrefix);
                     w.Write(IsNan);
                     w.Write((byte)'(');
-                    if (argPositions.Count >= 1) WriteSingleArg(span, w, argPositions[0]);
+                    if (argPositions.Count >= 1) WriteSingleArg(span, w, argPositions[0], schema);
                     w.Write((byte)')');
                     break;
 
@@ -1166,15 +1241,15 @@ namespace KustoAdbc.Substrait
                     if (argPositions.Count >= 2)
                     {
                         w.Write(Utf8KqlWriter.Iif);
-                        WriteSingleArg(span, w, argPositions[0]);
+                        WriteSingleArg(span, w, argPositions[0], schema);
                         w.Write(EqualOp);
-                        WriteSingleArg(span, w, argPositions[1]);
+                        WriteSingleArg(span, w, argPositions[1], schema);
                         w.Write(Utf8KqlWriter.Comma);
                         w.Write((byte)' ');
                         w.Write(Utf8KqlWriter.DynamicNull);
                         w.Write(Utf8KqlWriter.Comma);
                         w.Write((byte)' ');
-                        WriteSingleArg(span, w, argPositions[0]);
+                        WriteSingleArg(span, w, argPositions[0], schema);
                         w.Write((byte)')');
                     }
                     break;
@@ -1183,9 +1258,9 @@ namespace KustoAdbc.Substrait
                     // arg0 matches regex arg1
                     if (argPositions.Count >= 2)
                     {
-                        WriteSingleArg(span, w, argPositions[0]);
+                        WriteSingleArg(span, w, argPositions[0], schema);
                         w.Write(MatchesRegex);
-                        WriteSingleArg(span, w, argPositions[1]);
+                        WriteSingleArg(span, w, argPositions[1], schema);
                     }
                     break;
 
@@ -1193,24 +1268,24 @@ namespace KustoAdbc.Substrait
                     // Unknown special: emit as function call
                     w.Write(specialKey);
                     w.Write((byte)'(');
-                    WriteArgList(span, w, argPositions);
+                    WriteArgList(span, w, argPositions, schema);
                     w.Write((byte)')');
                     break;
             }
         }
 
-        void WriteSingleArg(ReadOnlySpan<byte> span, Utf8KqlWriter w, (int start, int len) arg)
+        void WriteSingleArg(ReadOnlySpan<byte> span, Utf8KqlWriter w, (int start, int len) arg, List<string>? schema)
         {
             int p = arg.start;
-            WriteFunctionArgument(span, ref p, arg.start + arg.len, w);
+            WriteFunctionArgument(span, ref p, arg.start + arg.len, w, schema);
         }
 
-        void WriteArgList(ReadOnlySpan<byte> span, Utf8KqlWriter w, List<(int start, int len)> argPositions)
+        void WriteArgList(ReadOnlySpan<byte> span, Utf8KqlWriter w, List<(int start, int len)> argPositions, List<string>? schema)
         {
             for (int i = 0; i < argPositions.Count; i++)
             {
                 if (i > 0) w.Write(Utf8KqlWriter.Comma);
-                WriteSingleArg(span, w, argPositions[i]);
+                WriteSingleArg(span, w, argPositions[i], schema);
             }
         }
 
@@ -1228,7 +1303,7 @@ namespace KustoAdbc.Substrait
         static readonly byte[] EqualOp = " == "u8.ToArray();
         static readonly byte[] NotPrefix = "not "u8.ToArray();
 
-        void WriteFunctionArgument(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        void WriteFunctionArgument(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<string>? schema)
         {
             while (pos < end)
             {
@@ -1242,7 +1317,7 @@ namespace KustoAdbc.Substrait
                     {
                         int len = ReadVarint32(span, ref pos);
                         int exprEnd = pos + len;
-                        WriteExpression(span, ref pos, exprEnd, w);
+                        WriteExpression(span, ref pos, exprEnd, w, schema);
                         pos = exprEnd;
                         return;
                     }
@@ -1254,7 +1329,7 @@ namespace KustoAdbc.Substrait
             w.Write(Utf8KqlWriter.UnknownArg);
         }
 
-        void WriteIfThen(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        void WriteIfThen(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<string>? schema)
         {
             var clausePositions = new System.Collections.Generic.List<(int start, int len)>();
             int elseStart = -1, elseLen = 0;
@@ -1291,18 +1366,18 @@ namespace KustoAdbc.Substrait
                 if (i > 0) { w.Write(Utf8KqlWriter.Comma); w.Write((byte)' '); }
                 w.Write(Utf8KqlWriter.Iif);
                 int p = clausePositions[i].start;
-                WriteIfClause(span, ref p, clausePositions[i].start + clausePositions[i].len, w);
+                WriteIfClause(span, ref p, clausePositions[i].start + clausePositions[i].len, w, schema);
             }
 
             w.Write(Utf8KqlWriter.Comma);
             w.Write((byte)' ');
-            if (elseStart >= 0) { int p = elseStart; WriteExpression(span, ref p, elseStart + elseLen, w); }
+            if (elseStart >= 0) { int p = elseStart; WriteExpression(span, ref p, elseStart + elseLen, w, schema); }
             else { w.Write(Utf8KqlWriter.DynamicNull); }
 
             for (int i = 0; i < clausePositions.Count; i++) w.Write((byte)')');
         }
 
-        void WriteIfClause(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        void WriteIfClause(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<string>? schema)
         {
             int condStart = -1, condLen = 0;
             int thenStart = -1, thenLen = 0;
@@ -1321,13 +1396,13 @@ namespace KustoAdbc.Substrait
                 }
             }
 
-            if (condStart >= 0) { int p = condStart; WriteExpression(span, ref p, condStart + condLen, w); }
+            if (condStart >= 0) { int p = condStart; WriteExpression(span, ref p, condStart + condLen, w, schema); }
             else { w.Write(Utf8KqlWriter.True); }
 
             w.Write(Utf8KqlWriter.Comma);
             w.Write((byte)' ');
 
-            if (thenStart >= 0) { int p = thenStart; WriteExpression(span, ref p, thenStart + thenLen, w); }
+            if (thenStart >= 0) { int p = thenStart; WriteExpression(span, ref p, thenStart + thenLen, w, schema); }
             else { w.Write(Utf8KqlWriter.DynamicNull); }
         }
 

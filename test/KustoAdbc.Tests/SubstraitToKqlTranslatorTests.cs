@@ -154,6 +154,17 @@ namespace KustoAdbc.Tests
             public static byte[] NamedTable(string name) => StrField(1, name);
             public static byte[] ReadRel(string table) => LenDel(7, NamedTable(table));
 
+            public static byte[] ReadRelWithSchema(string table, string[] columnNames)
+            {
+                // NamedStruct: field 1 = repeated string (names)
+                var nameParts = new System.Collections.Generic.List<byte[]>();
+                foreach (var name in columnNames)
+                    nameParts.Add(StrField(1, name));
+                var namedStruct = nameParts.Count > 0 ? Cat(nameParts.ToArray()) : Array.Empty<byte>();
+                // ReadRel: field 2 = NamedStruct, field 7 = NamedTable
+                return Cat(LenDel(2, namedStruct), LenDel(7, NamedTable(table)));
+            }
+
             // Rel oneof field numbers: read=1, filter=2, fetch=3, aggregate=4, sort=5, join=6, project=7
             public static byte[] Rel(int field, byte[] content) => LenDel(field, content);
 
@@ -319,6 +330,17 @@ namespace KustoAdbc.Tests
         [Fact]
         public void Project_TranslatesToProject()
         {
+            var input = PB.Rel(1, PB.ReadRelWithSchema("Users", new[] { "col_a", "col_b" }));
+            var project = PB.ProjectRel(input, PB.FieldRef(0), PB.FieldRef(1));
+            var plan = BuildPlan(7, project);
+
+            string kql = SubstraitToKqlTranslator.Translate(plan);
+            AssertKqlEqual("Users | project col_a, col_b", kql);
+        }
+
+        [Fact]
+        public void Project_WithoutSchema_FallsBackToFieldN()
+        {
             var input = PB.Rel(1, PB.ReadRel("Users"));
             var project = PB.ProjectRel(input, PB.FieldRef(0), PB.FieldRef(1));
             var plan = BuildPlan(7, project);
@@ -363,25 +385,25 @@ namespace KustoAdbc.Tests
         [Fact]
         public void Sort_Desc_TranslatesToSortBy()
         {
-            var input = PB.Rel(1, PB.ReadRel("Orders"));
+            var input = PB.Rel(1, PB.ReadRelWithSchema("Orders", new[] { "price" }));
             var sf = PB.SortField(PB.FieldRef(0), 3); // desc_nulls_first
             var sort = PB.SortRel(input, sf);
             var plan = BuildPlan(5, sort);
 
             string kql = SubstraitToKqlTranslator.Translate(plan);
-            AssertKqlEqual("Orders | sort by $field0 desc", kql);
+            AssertKqlEqual("Orders | sort by price desc", kql);
         }
 
         [Fact]
         public void Sort_Asc_TranslatesToSortBy()
         {
-            var input = PB.Rel(1, PB.ReadRel("Orders"));
+            var input = PB.Rel(1, PB.ReadRelWithSchema("Orders", new[] { "price" }));
             var sf = PB.SortField(PB.FieldRef(0), 1); // asc_nulls_first
             var sort = PB.SortRel(input, sf);
             var plan = BuildPlan(5, sort);
 
             string kql = SubstraitToKqlTranslator.Translate(plan);
-            AssertKqlEqual("Orders | sort by $field0 asc", kql);
+            AssertKqlEqual("Orders | sort by price asc", kql);
         }
 
         #endregion
@@ -391,14 +413,14 @@ namespace KustoAdbc.Tests
         [Fact]
         public void Aggregate_TranslatesToSummarize()
         {
-            var input = PB.Rel(1, PB.ReadRel("Sales"));
+            var input = PB.Rel(1, PB.ReadRelWithSchema("Sales", new[] { "region", "amount" }));
             var grouping = PB.Grouping(PB.FieldRef(0));
             var measure = PB.Measure(PB.FieldRef(1));
             var agg = PB.AggregateRel(input, new[] { grouping }, new[] { measure });
             var plan = BuildPlan(4, agg);
 
             string kql = SubstraitToKqlTranslator.Translate(plan);
-            AssertKqlEqual("Sales | summarize $field1 by $field0", kql);
+            AssertKqlEqual("Sales | summarize amount by region", kql);
         }
 
         #endregion
@@ -408,8 +430,8 @@ namespace KustoAdbc.Tests
         [Fact]
         public void InnerJoin_TranslatesToJoinKindInner()
         {
-            var left = PB.Rel(1, PB.ReadRel("Employees"));
-            var right = PB.Rel(1, PB.ReadRel("Departments"));
+            var left = PB.Rel(1, PB.ReadRelWithSchema("Employees", new[] { "emp_id", "dept_id" }));
+            var right = PB.Rel(1, PB.ReadRelWithSchema("Departments", new[] { "id", "name" }));
             var join = PB.JoinRel(left, right, PB.FieldRef(0), 1); // inner
             var plan = BuildPlan(6, join);
 
@@ -453,8 +475,8 @@ namespace KustoAdbc.Tests
         [Fact]
         public void FilterSortFetch_ProducesCorrectPipelineOrder()
         {
-            // Build: Employees | where true | sort by $field0 desc | take 5
-            var read = PB.Rel(1, PB.ReadRel("Employees"));
+            // Build: Employees | where true | sort by name desc | take 5
+            var read = PB.Rel(1, PB.ReadRelWithSchema("Employees", new[] { "name" }));
             var filter = PB.Rel(2, PB.FilterRel(read, PB.LitBool(true)));
             var sort = PB.Rel(5, PB.SortRel(filter,
                 PB.SortField(PB.FieldRef(0), 3))); // desc
@@ -463,22 +485,22 @@ namespace KustoAdbc.Tests
 
             string kql = SubstraitToKqlTranslator.Translate(plan);
             AssertKqlEqual(
-                "Employees | where true | sort by $field0 desc | take 5",
+                "Employees | where true | sort by name desc | take 5",
                 kql);
         }
 
         [Fact]
         public void FilterProject_ProducesCorrectPipelineOrder()
         {
-            // Build: Users | where true | project $field0, $field1
-            var read = PB.Rel(1, PB.ReadRel("Users"));
+            // Build: Users | where true | project col_a, col_b
+            var read = PB.Rel(1, PB.ReadRelWithSchema("Users", new[] { "col_a", "col_b" }));
             var filter = PB.Rel(2, PB.FilterRel(read, PB.LitBool(true)));
             var project = PB.ProjectRel(filter, PB.FieldRef(0), PB.FieldRef(1));
             var plan = BuildPlan(7, project);
 
             string kql = SubstraitToKqlTranslator.Translate(plan);
             AssertKqlEqual(
-                "Users | where true | project $field0, $field1",
+                "Users | where true | project col_a, col_b",
                 kql);
         }
 
@@ -528,8 +550,14 @@ namespace KustoAdbc.Tests
         /// uses a scalar function resolved via the extension declarations.
         /// </summary>
         static byte[] BuildPlanWithScalarFilter(string table, string funcSignature, int funcAnchor, byte[] scalarExpr)
+            => BuildPlanWithScalarFilter(table, null, funcSignature, funcAnchor, scalarExpr);
+
+        static byte[] BuildPlanWithScalarFilter(string table, string[]? columnNames, string funcSignature, int funcAnchor, byte[] scalarExpr)
         {
-            var read = PB.Rel(1, PB.ReadRel(table));
+            var readContent = columnNames != null
+                ? PB.ReadRelWithSchema(table, columnNames)
+                : PB.ReadRel(table);
+            var read = PB.Rel(1, readContent);
             var filter = PB.FilterRel(read, scalarExpr);
             var rel = PB.Rel(2, filter);
             var planRel = PB.PlanRel(rel);
@@ -543,23 +571,23 @@ namespace KustoAdbc.Tests
         [Fact]
         public void Add_TranslatesToInfixPlus()
         {
-            // add(field0, 10) → $field0 + 10
+            // add(x, 10) → x + 10
             var expr = PB.ScalarFunc(100, PB.FieldRef(0), PB.LitI32(10));
-            var plan = BuildPlanWithScalarFilter("T", "add:i32_i32", 100, expr);
+            var plan = BuildPlanWithScalarFilter("T", new[] { "x" }, "add:i32_i32", 100, expr);
 
             string kql = SubstraitToKqlTranslator.Translate(plan);
             AssertValidKql(kql);
-            AssertKqlEqual("T | where $field0 + 10", kql);
+            AssertKqlEqual("T | where x + 10", kql);
         }
 
         [Fact]
         public void Subtract_TranslatesToInfixMinus()
         {
             var expr = PB.ScalarFunc(101, PB.FieldRef(0), PB.LitI32(5));
-            var plan = BuildPlanWithScalarFilter("T", "subtract:i32_i32", 101, expr);
+            var plan = BuildPlanWithScalarFilter("T", new[] { "val" }, "subtract:i32_i32", 101, expr);
 
             string kql = SubstraitToKqlTranslator.Translate(plan);
-            AssertKqlEqual("T | where $field0 - 5", kql);
+            AssertKqlEqual("T | where val - 5", kql);
         }
 
         [Fact]
@@ -569,32 +597,31 @@ namespace KustoAdbc.Tests
             var plan = PB.PlanWithExtensions(
                 new[] { PB.ExtUri(1, "extension:io.substrait:functions_comparison") },
                 new[] { PB.ExtFunc(1, 200, "equal:any_any") },
-                PB.PlanRel(PB.Rel(2, PB.FilterRel(PB.Rel(1, PB.ReadRel("T")), expr))));
+                PB.PlanRel(PB.Rel(2, PB.FilterRel(PB.Rel(1, PB.ReadRelWithSchema("T", new[] { "name" })), expr))));
 
             string kql = SubstraitToKqlTranslator.Translate(plan);
-            AssertKqlEqual("T | where $field0 == 'hello'", kql);
+            AssertKqlEqual("T | where name == 'hello'", kql);
         }
 
         [Fact]
         public void LessThan_TranslatesToLtOperator()
         {
             var expr = PB.ScalarFunc(201, PB.FieldRef(0), PB.LitI32(100));
-            var plan = BuildPlanWithScalarFilter("T", "lt:i32_i32", 201, expr);
+            var plan = BuildPlanWithScalarFilter("T", new[] { "age" }, "lt:i32_i32", 201, expr);
 
             string kql = SubstraitToKqlTranslator.Translate(plan);
-            AssertKqlEqual("T | where $field0 < 100", kql);
+            AssertKqlEqual("T | where age < 100", kql);
         }
 
         [Fact]
         public void And_TranslatesToInfixAnd()
         {
-            // and(lt(field0, 100), gt(field1, 0))
-            // Need two function declarations
+            // and(lt(x, 100), gt(y, 0))
             var lt = PB.ScalarFunc(300, PB.FieldRef(0), PB.LitI32(100));
             var gt = PB.ScalarFunc(301, PB.FieldRef(1), PB.LitI32(0));
             var andExpr = PB.ScalarFunc(302, lt, gt);
 
-            var read = PB.Rel(1, PB.ReadRel("T"));
+            var read = PB.Rel(1, PB.ReadRelWithSchema("T", new[] { "x", "y" }));
             var filter = PB.FilterRel(read, andExpr);
             var rel = PB.Rel(2, filter);
             var planRel = PB.PlanRel(rel);
@@ -609,7 +636,7 @@ namespace KustoAdbc.Tests
 
             string kql = SubstraitToKqlTranslator.Translate(plan);
             AssertValidKql(kql);
-            AssertKqlEqual("T | where $field0 < 100 and $field1 > 0", kql);
+            AssertKqlEqual("T | where x < 100 and y > 0", kql);
         }
 
         [Fact]
@@ -623,11 +650,11 @@ namespace KustoAdbc.Tests
                         PB.ExtUri(2, "extension:io.substrait:functions_boolean") },
                 new[] { PB.ExtFunc(1, 400, "equal:i32_i32"),
                         PB.ExtFunc(2, 401, "not:bool") },
-                PB.PlanRel(PB.Rel(2, PB.FilterRel(PB.Rel(1, PB.ReadRel("T")), notExpr))));
+                PB.PlanRel(PB.Rel(2, PB.FilterRel(PB.Rel(1, PB.ReadRelWithSchema("T", new[] { "active" })), notExpr))));
 
             string kql = SubstraitToKqlTranslator.Translate(plan);
             AssertValidKql(kql);
-            AssertKqlEqual("T | where not ($field0 == 0)", kql);
+            AssertKqlEqual("T | where not (active == 0)", kql);
         }
 
         [Fact]
@@ -638,11 +665,11 @@ namespace KustoAdbc.Tests
             var plan = PB.PlanWithExtensions(
                 new[] { PB.ExtUri(1, "extension:io.substrait:functions_string") },
                 new[] { PB.ExtFunc(1, 500, "char_length:str") },
-                PB.PlanRel(PB.Rel(2, PB.FilterRel(PB.Rel(1, PB.ReadRel("T")), expr))));
+                PB.PlanRel(PB.Rel(2, PB.FilterRel(PB.Rel(1, PB.ReadRelWithSchema("T", new[] { "msg" })), expr))));
 
             string kql = SubstraitToKqlTranslator.Translate(plan);
             AssertValidKql(kql);
-            AssertKqlEqual("T | where strlen($field0)", kql);
+            AssertKqlEqual("T | where strlen(msg)", kql);
         }
 
         [Fact]
@@ -653,11 +680,11 @@ namespace KustoAdbc.Tests
             var plan = PB.PlanWithExtensions(
                 new[] { PB.ExtUri(1, "extension:io.substrait:functions_comparison") },
                 new[] { PB.ExtFunc(1, 600, "is_null:any") },
-                PB.PlanRel(PB.Rel(2, PB.FilterRel(PB.Rel(1, PB.ReadRel("T")), expr))));
+                PB.PlanRel(PB.Rel(2, PB.FilterRel(PB.Rel(1, PB.ReadRelWithSchema("T", new[] { "col" })), expr))));
 
             string kql = SubstraitToKqlTranslator.Translate(plan);
             AssertValidKql(kql);
-            AssertKqlEqual("T | where isnull($field0)", kql);
+            AssertKqlEqual("T | where isnull(col)", kql);
         }
 
         [Fact]
@@ -680,21 +707,21 @@ namespace KustoAdbc.Tests
             var plan = PB.PlanWithExtensions(
                 new[] { PB.ExtUri(1, "extension:io.substrait:functions_string") },
                 new[] { PB.ExtFunc(1, 700, "concat:str_str") },
-                PB.PlanRel(PB.Rel(2, PB.FilterRel(PB.Rel(1, PB.ReadRel("T")), expr))));
+                PB.PlanRel(PB.Rel(2, PB.FilterRel(PB.Rel(1, PB.ReadRelWithSchema("T", new[] { "tag" })), expr))));
 
             string kql = SubstraitToKqlTranslator.Translate(plan);
             AssertValidKql(kql);
-            AssertKqlEqual("T | where strcat($field0, '_suffix')", kql);
+            AssertKqlEqual("T | where strcat(tag, '_suffix')", kql);
         }
 
         [Fact]
         public void Multiply_TranslatesToInfixStar()
         {
             var expr = PB.ScalarFunc(800, PB.FieldRef(0), PB.FieldRef(1));
-            var plan = BuildPlanWithScalarFilter("T", "multiply:fp64_fp64", 800, expr);
+            var plan = BuildPlanWithScalarFilter("T", new[] { "a", "b" }, "multiply:fp64_fp64", 800, expr);
 
             string kql = SubstraitToKqlTranslator.Translate(plan);
-            AssertKqlEqual("T | where $field0 * $field1", kql);
+            AssertKqlEqual("T | where a * b", kql);
         }
 
         [Fact]

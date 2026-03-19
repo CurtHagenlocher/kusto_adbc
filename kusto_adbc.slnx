@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/KustoAdbc/KustoAdbc.csproj" />
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/KustoAdbc.Tests/KustoAdbc.Tests.csproj" />
+  </Folder>
+</Solution>

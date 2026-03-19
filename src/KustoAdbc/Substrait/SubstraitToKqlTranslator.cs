@@ -41,6 +41,36 @@ namespace KustoAdbc.Substrait
     /// directly to a <see cref="Utf8KqlWriter"/>.
     /// All KQL output is UTF-8 with zero intermediate string allocations.
     /// </summary>
+    /// <summary>
+    /// A zero-allocation reference to a UTF-8 string within the protobuf input buffer.
+    /// Avoids the UTF-8 → .NET string → UTF-8 round-trip for column names.
+    /// </summary>
+    readonly struct Utf8Span
+    {
+        public readonly int Offset;
+        public readonly int Length;
+
+        public Utf8Span(int offset, int length)
+        {
+            Offset = offset;
+            Length = length;
+        }
+
+        /// <summary>Extracts the UTF-8 bytes as a ReadOnlySpan from the source buffer.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public ReadOnlySpan<byte> AsSpan(byte[] source) => source.AsSpan(Offset, Length);
+
+        /// <summary>Converts to a .NET string (for debugging/tests only).</summary>
+        public string ToString(byte[] source)
+        {
+#if NETSTANDARD2_0
+            return Encoding.UTF8.GetString(source, Offset, Length);
+#else
+            return Encoding.UTF8.GetString(source.AsSpan(Offset, Length));
+#endif
+        }
+    }
+
     sealed class SubstraitPlanReader
     {
         readonly byte[] _data;
@@ -213,7 +243,7 @@ namespace KustoAdbc.Substrait
                 _functionAnchors[anchor] = name;
         }
 
-        List<string>? WritePlanRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<Utf8Span>? WritePlanRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             while (pos < end)
             {
@@ -247,7 +277,7 @@ namespace KustoAdbc.Substrait
             throw new InvalidOperationException("PlanRel has no relation.");
         }
 
-        List<string>? WriteRelRoot(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<Utf8Span>? WriteRelRoot(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             while (pos < end)
             {
@@ -273,7 +303,7 @@ namespace KustoAdbc.Substrait
             throw new InvalidOperationException("RelRoot has no input.");
         }
 
-        List<string>? WriteRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<Utf8Span>? WriteRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             while (pos < end)
             {
@@ -337,9 +367,9 @@ namespace KustoAdbc.Substrait
 
         #region Relation Writers
 
-        List<string>? WriteReadRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<Utf8Span>? WriteReadRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
-            List<string>? schema = null;
+            List<Utf8Span>? schema = null;
 
             while (pos < end)
             {
@@ -377,9 +407,9 @@ namespace KustoAdbc.Substrait
             return schema;
         }
 
-        List<string> ParseNamedStructNames(ReadOnlySpan<byte> span, ref int pos, int end)
+        List<Utf8Span> ParseNamedStructNames(ReadOnlySpan<byte> span, ref int pos, int end)
         {
-            var names = new List<string>();
+            var names = new List<Utf8Span>();
             while (pos < end)
             {
                 int tag = ReadTag(span, ref pos);
@@ -388,14 +418,10 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // names (repeated string)
+                    case 1: // names (repeated string) — store as range into _data
                     {
                         int len = ReadVarint32(span, ref pos);
-#if NETSTANDARD2_0
-                        names.Add(System.Text.Encoding.UTF8.GetString(span.Slice(pos, len).ToArray()));
-#else
-                        names.Add(System.Text.Encoding.UTF8.GetString(span.Slice(pos, len)));
-#endif
+                        names.Add(new Utf8Span(pos, len));
                         pos += len;
                         break;
                     }
@@ -432,7 +458,7 @@ namespace KustoAdbc.Substrait
             throw new InvalidOperationException("NamedTable has no name.");
         }
 
-        List<string>? WriteFilterRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<Utf8Span>? WriteFilterRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             // We must parse both input and condition before writing,
             // because protobuf fields can appear in any order.
@@ -482,7 +508,7 @@ namespace KustoAdbc.Substrait
             return schema;
         }
 
-        List<string>? WriteProjectRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<Utf8Span>? WriteProjectRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             // Collect expression positions, then write in order.
             int inputStart = -1, inputLen = 0;
@@ -535,7 +561,7 @@ namespace KustoAdbc.Substrait
             return null; // ProjectRel output schema depends on expressions; complex to track
         }
 
-        List<string>? WriteFetchRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<Utf8Span>? WriteFetchRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             int inputStart = -1, inputLen = 0;
             long offset = 0, count = -1;
@@ -580,7 +606,7 @@ namespace KustoAdbc.Substrait
             return schema;
         }
 
-        List<string>? WriteSortRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<Utf8Span>? WriteSortRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             int inputStart = -1, inputLen = 0;
             var sortPositions = new System.Collections.Generic.List<(int start, int len)>();
@@ -629,7 +655,7 @@ namespace KustoAdbc.Substrait
             return schema;
         }
 
-        void WriteSortField(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<string>? schema)
+        void WriteSortField(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<Utf8Span>? schema)
         {
             int exprStart = -1, exprLen = 0;
             int direction = 0;
@@ -663,7 +689,7 @@ namespace KustoAdbc.Substrait
             else if (direction is 3 or 4) w.Write(Utf8KqlWriter.Desc);
         }
 
-        List<string>? WriteAggregateRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<Utf8Span>? WriteAggregateRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             int inputStart = -1, inputLen = 0;
             var groupPositions = new System.Collections.Generic.List<(int start, int len)>();
@@ -729,7 +755,7 @@ namespace KustoAdbc.Substrait
             return null; // AggregateRel output schema depends on groupings + measures
         }
 
-        void WriteGroupingExprs(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, ref bool first, List<string>? schema)
+        void WriteGroupingExprs(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, ref bool first, List<Utf8Span>? schema)
         {
             while (pos < end)
             {
@@ -756,7 +782,7 @@ namespace KustoAdbc.Substrait
             }
         }
 
-        void WriteMeasure(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<string>? schema)
+        void WriteMeasure(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<Utf8Span>? schema)
         {
             bool found = false;
             while (pos < end)
@@ -784,7 +810,7 @@ namespace KustoAdbc.Substrait
             if (!found) w.Write(Utf8KqlWriter.CountFunc);
         }
 
-        List<string>? WriteJoinRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
+        List<Utf8Span>? WriteJoinRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
             int leftStart = -1, leftLen = 0;
             int rightStart = -1, rightLen = 0;
@@ -831,20 +857,20 @@ namespace KustoAdbc.Substrait
             w.Write((byte)')');
 
             // Join output schema is left + right columns concatenated
-            List<string>? joinSchema = null;
+            List<Utf8Span>? joinSchema = null;
             if (leftSchema != null && rightSchema != null)
             {
-                joinSchema = new List<string>(leftSchema.Count + rightSchema.Count);
+                joinSchema = new List<Utf8Span>(leftSchema.Count + rightSchema.Count);
                 joinSchema.AddRange(leftSchema);
                 joinSchema.AddRange(rightSchema);
             }
             else if (leftSchema != null)
             {
-                joinSchema = new List<string>(leftSchema);
+                joinSchema = new List<Utf8Span>(leftSchema);
             }
             else if (rightSchema != null)
             {
-                joinSchema = new List<string>(rightSchema);
+                joinSchema = new List<Utf8Span>(rightSchema);
             }
 
             if (condStart >= 0)
@@ -861,7 +887,7 @@ namespace KustoAdbc.Substrait
 
         #region Expression Writers
 
-        void WriteExpression(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<string>? schema = null)
+        void WriteExpression(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<Utf8Span>? schema = null)
         {
             while (pos < end)
             {
@@ -965,7 +991,7 @@ namespace KustoAdbc.Substrait
             w.Write(Utf8KqlWriter.DynamicNull);
         }
 
-        void WriteFieldReference(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<string>? schema)
+        void WriteFieldReference(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<Utf8Span>? schema)
         {
             int fieldIndex = -1;
             while (pos < end)
@@ -993,7 +1019,7 @@ namespace KustoAdbc.Substrait
             if (fieldIndex >= 0)
             {
                 if (schema != null && fieldIndex < schema.Count)
-                    w.WriteUtf8(Encoding.UTF8.GetBytes(schema[fieldIndex]));
+                    w.WriteUtf8(schema[fieldIndex].AsSpan(_data));
                 else
                     w.WriteFieldRef(fieldIndex);
             }
@@ -1052,7 +1078,7 @@ namespace KustoAdbc.Substrait
             return fieldIndex;
         }
 
-        void WriteScalarFunction(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<string>? schema)
+        void WriteScalarFunction(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<Utf8Span>? schema)
         {
             int functionRef = 0;
             var argPositions = new List<(int start, int len)>();
@@ -1095,7 +1121,7 @@ namespace KustoAdbc.Substrait
         }
 
         void WriteResolvedFunction(ReadOnlySpan<byte> span, Utf8KqlWriter w,
-            KqlFunctionMapping mapping, List<(int start, int len)> argPositions, List<string>? schema)
+            KqlFunctionMapping mapping, List<(int start, int len)> argPositions, List<Utf8Span>? schema)
         {
             switch (mapping.Kind)
             {
@@ -1134,7 +1160,7 @@ namespace KustoAdbc.Substrait
         }
 
         void WriteSpecialFunction(ReadOnlySpan<byte> span, Utf8KqlWriter w,
-            byte[] specialKey, List<(int start, int len)> argPositions, List<string>? schema)
+            byte[] specialKey, List<(int start, int len)> argPositions, List<Utf8Span>? schema)
         {
             // Match on the special key to determine output format.
             // specialKey is a UTF-8 encoded string like "is_null", "between", etc.
@@ -1274,13 +1300,13 @@ namespace KustoAdbc.Substrait
             }
         }
 
-        void WriteSingleArg(ReadOnlySpan<byte> span, Utf8KqlWriter w, (int start, int len) arg, List<string>? schema)
+        void WriteSingleArg(ReadOnlySpan<byte> span, Utf8KqlWriter w, (int start, int len) arg, List<Utf8Span>? schema)
         {
             int p = arg.start;
             WriteFunctionArgument(span, ref p, arg.start + arg.len, w, schema);
         }
 
-        void WriteArgList(ReadOnlySpan<byte> span, Utf8KqlWriter w, List<(int start, int len)> argPositions, List<string>? schema)
+        void WriteArgList(ReadOnlySpan<byte> span, Utf8KqlWriter w, List<(int start, int len)> argPositions, List<Utf8Span>? schema)
         {
             for (int i = 0; i < argPositions.Count; i++)
             {
@@ -1303,7 +1329,7 @@ namespace KustoAdbc.Substrait
         static readonly byte[] EqualOp = " == "u8.ToArray();
         static readonly byte[] NotPrefix = "not "u8.ToArray();
 
-        void WriteFunctionArgument(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<string>? schema)
+        void WriteFunctionArgument(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<Utf8Span>? schema)
         {
             while (pos < end)
             {
@@ -1329,7 +1355,7 @@ namespace KustoAdbc.Substrait
             w.Write(Utf8KqlWriter.UnknownArg);
         }
 
-        void WriteIfThen(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<string>? schema)
+        void WriteIfThen(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<Utf8Span>? schema)
         {
             var clausePositions = new System.Collections.Generic.List<(int start, int len)>();
             int elseStart = -1, elseLen = 0;
@@ -1377,7 +1403,7 @@ namespace KustoAdbc.Substrait
             for (int i = 0; i < clausePositions.Count; i++) w.Write((byte)')');
         }
 
-        void WriteIfClause(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<string>? schema)
+        void WriteIfClause(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<Utf8Span>? schema)
         {
             int condStart = -1, condLen = 0;
             int thenStart = -1, thenLen = 0;

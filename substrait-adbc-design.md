@@ -259,46 +259,59 @@ write:
 
 ### 4.3 What Substrait would need to add
 
-Substrait currently has no protobuf message for capability declaration. We propose:
+Substrait's existing extension system is YAML-based — functions, types, and type variations are all declared in YAML. Capability declaration should follow the same pattern: **a YAML schema for capability documents**.
 
-```protobuf
-message Capabilities {
-  Version substrait_version = 1;
-  
-  RelationCapabilities relations = 2;
-  repeated SimpleExtensionURN supported_extension_urns = 3;
-  repeated FunctionCapability functions = 4;
-  repeated TypeCapability types = 5;
-  ExpressionCapabilities expressions = 6;
-  WriteCapabilities write = 7;
-  
-  AdvancedExtension advanced_extensions = 100;
-}
+The YAML capability document would extend the existing `simple_extensions` schema with new top-level sections for relation capabilities, expression capabilities, and write capabilities. Function and type capabilities are already covered by the existing YAML schema.
 
-message RelationCapabilities {
-  bool read = 1;
-  bool filter = 2;
-  bool project = 3;
-  bool aggregate = 4;
-  bool sort = 5;
-  bool fetch = 6;
-  JoinCapabilities join = 7;
-  bool set_operation = 8;
-  bool window = 9;
-  // ...
-}
+```yaml
+%YAML 1.2
+---
+# Capability document for Kusto ADBC driver
 
-message JoinCapabilities {
-  bool inner = 1;
-  bool left = 2;
-  bool right = 3;
-  bool full_outer = 4;
-  bool left_semi = 5;
-  bool left_anti = 6;
-  bool cross = 7;
-  bool lateral = 8;
-}
+substrait_version: {major: 0, minor: 55}
+
+relations:
+  read: { named_table: true, virtual_table: false }
+  filter: true
+  project: true
+  fetch: { offset: true }
+  sort: { multi_key: true }
+  aggregate: { grouping_sets: false, distinct: true }
+  join:
+    inner: true
+    left: true
+    right: true
+    full_outer: true
+    left_semi: true
+    left_anti: true
+    cross: false
+    lateral: false
+  set: false
+  window: false
+
+expressions:
+  literals: true
+  field_references: true
+  scalar_functions: true
+  if_then: true
+  cast: true
+  subqueries: false
+  window_functions: false
+
+write:
+  insert: true
+  bulk_ingest: true
+  update: false
+  delete: false
+
+# Function and type capabilities use the existing
+# simple_extensions YAML schema (scalar_functions,
+# aggregate_functions, types, type_variations).
 ```
+
+A formal Substrait addition would be a **capability YAML schema** (like the existing `simple_extensions_schema.yaml`) that defines the allowed structure. This is consistent with the ecosystem and requires no protobuf changes.
+
+For scenarios that require machine-to-machine exchange over a wire protocol (e.g., a remote query optimizer negotiating with backends), a protobuf `Capabilities` message could be defined as an optional binary equivalent, but YAML should be the primary format.
 
 ---
 
@@ -457,9 +470,9 @@ These optimizations are engine-specific and cannot be standardized in Substrait.
 
 **Impact**: Applications cannot discover what a driver supports before building a plan. This is the single biggest gap.
 
-**Proposed extension**: Add a `Capabilities` protobuf message (see Section 4.3) and a corresponding YAML schema for human-readable capability documents.
+**Proposed extension**: Add a capability YAML schema (consistent with the existing `simple_extensions_schema.yaml`) that defines the structure for relation, expression, and write capabilities. Function and type capabilities are already covered. Optionally, define a protobuf equivalent for wire-protocol scenarios.
 
-**Effort**: Medium. Requires a new .proto file, YAML schema, and community consensus on the capability dimensions.
+**Effort**: Medium. Requires a new YAML schema, community consensus on the capability dimensions, and a reference parser.
 
 ### Gap 2: No relation-level capability granularity
 
@@ -612,7 +625,7 @@ We have built a working proof-of-concept that demonstrates the core mechanics:
 
 | # | Gap | Where | Severity | Proposed Solution |
 |---|-----|-------|----------|-------------------|
-| 1 | No capability declaration | Substrait | **Critical** | New `Capabilities` protobuf message + YAML schema |
+| 1 | No capability declaration | Substrait | **Critical** | New capability YAML schema (extending simple_extensions) |
 | 2 | No relation-level capabilities | Substrait | **Critical** | `RelationCapabilities` in Capabilities message |
 | 3 | Join type granularity | Substrait | **High** | `JoinCapabilities` + address Issue #325 |
 | 4 | No plan validation | Substrait | **High** | `ValidationResult` message |

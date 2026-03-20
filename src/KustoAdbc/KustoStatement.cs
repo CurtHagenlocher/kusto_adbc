@@ -84,7 +84,21 @@ namespace KustoAdbc
 
         static string TranslateSubstrait(byte[] plan)
         {
-            return Substrait.SubstraitToKqlTranslator.Translate(plan);
+            try
+            {
+                return Substrait.SubstraitToKqlTranslator.Translate(plan);
+            }
+            catch (Substrait.SubstraitTranslationException)
+            {
+                throw; // Already an AdbcException — propagate as-is
+            }
+            catch (Exception ex)
+            {
+                throw new AdbcException(
+                    $"Failed to translate Substrait plan to KQL: {ex.Message}",
+                    AdbcStatusCode.InvalidArgument,
+                    ex);
+            }
         }
 
         void ThrowIfDisposed()

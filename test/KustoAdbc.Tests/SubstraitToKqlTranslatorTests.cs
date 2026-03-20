@@ -541,6 +541,47 @@ namespace KustoAdbc.Tests
             Assert.Throws<ArgumentException>(() => SubstraitToKqlTranslator.Translate(null!));
         }
 
+        [Fact]
+        public void MalformedPlan_NoRelations_ThrowsWithMessage()
+        {
+            // A plan with only extension URNs but no relations
+            var plan = PB.Cat(PB.LenDel(8, PB.ExtUri(1, "extension:io.substrait:test")));
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("no relations", ex.Message, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
+        public void UnsupportedFunction_DeclaredButNotMapped_ThrowsWithFunctionName()
+        {
+            // Function is declared in extensions but has no KQL mapping
+            var expr = PB.ScalarFunc(42, PB.FieldRef(0));
+            var read = PB.Rel(1, PB.ReadRel("T"));
+            var filter = PB.FilterRel(read, expr);
+            var rel = PB.Rel(2, filter);
+            var planRel = PB.PlanRel(rel);
+
+            var plan = PB.PlanWithExtensions(
+                new[] { PB.ExtUri(1, "extension:io.substrait:functions_custom") },
+                new[] { PB.ExtFunc(1, 42, "some_exotic_function:fp64") },
+                planRel);
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("some_exotic_function", ex.Message);
+            Assert.Contains("no KQL equivalent", ex.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("KustoCapabilities", ex.Message);
+        }
+
+        [Fact]
+        public void AllTranslationErrors_AreAdbcExceptions()
+        {
+            // Verify that SubstraitTranslationException is an AdbcException
+            var ex = SubstraitTranslationException.UnsupportedFunction("test:i32");
+            Assert.IsAssignableFrom<Apache.Arrow.Adbc.AdbcException>(ex);
+        }
+
         #endregion
 
         #region Extension Function Resolution
@@ -688,15 +729,16 @@ namespace KustoAdbc.Tests
         }
 
         [Fact]
-        public void UnresolvedFunction_FallsBackToFuncN()
+        public void UndeclaredFunction_ThrowsWithAnchorInfo()
         {
-            // A scalar function with no matching extension declaration
-            // should fall back to func_N(args)
+            // A scalar function with no extension declaration should throw
             var expr = PB.ScalarFunc(999, PB.FieldRef(0));
             var plan = BuildPlan(2, PB.FilterRel(PB.Rel(1, PB.ReadRel("T")), expr));
 
-            string kql = SubstraitToKqlTranslator.Translate(plan);
-            Assert.Contains("func_999", kql);
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("anchor=999", ex.Message);
+            Assert.Contains("undeclared", ex.Message, StringComparison.OrdinalIgnoreCase);
         }
 
         [Fact]

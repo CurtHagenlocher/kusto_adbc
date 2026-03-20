@@ -133,7 +133,7 @@ namespace KustoAdbc.Substrait
                 }
             }
 
-            if (!found) throw new InvalidOperationException("Substrait plan contains no relations.");
+            if (!found) throw SubstraitTranslationException.MalformedPlan("Plan contains no relations.");
 
             // Now process the first relation with extension context available
             int p = relationPositions[0].start;
@@ -274,7 +274,7 @@ namespace KustoAdbc.Substrait
                         break;
                 }
             }
-            throw new InvalidOperationException("PlanRel has no relation.");
+            throw SubstraitTranslationException.MalformedPlan("PlanRel has no relation.");
         }
 
         List<Utf8Span>? WriteRelRoot(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
@@ -300,11 +300,12 @@ namespace KustoAdbc.Substrait
                         break;
                 }
             }
-            throw new InvalidOperationException("RelRoot has no input.");
+            throw SubstraitTranslationException.MalformedPlan("RelRoot has no input.");
         }
 
         List<Utf8Span>? WriteRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
         {
+            int lastSeenRelField = 0;
             while (pos < end)
             {
                 int tag = ReadTag(span, ref pos);
@@ -358,11 +359,13 @@ namespace KustoAdbc.Substrait
                         pos = relEnd;
                         return projSchema;
                     default:
+                        if (fieldNumber > 7 && fieldNumber <= 20)
+                            lastSeenRelField = fieldNumber; // likely an unsupported relation type
                         SkipField(span, wireType, ref pos);
                         break;
                 }
             }
-            throw new InvalidOperationException("Rel message has no recognized relation type.");
+            throw SubstraitTranslationException.UnsupportedRelation(lastSeenRelField);
         }
 
         #region Relation Writers
@@ -455,7 +458,7 @@ namespace KustoAdbc.Substrait
                         break;
                 }
             }
-            throw new InvalidOperationException("NamedTable has no name.");
+            throw SubstraitTranslationException.MalformedPlan("NamedTable has no name.");
         }
 
         List<Utf8Span>? WriteFilterRel(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
@@ -497,8 +500,8 @@ namespace KustoAdbc.Substrait
                 }
             }
 
-            if (inputStart < 0) throw new InvalidOperationException("FilterRel missing input.");
-            if (condStart < 0) throw new InvalidOperationException("FilterRel missing condition.");
+            if (inputStart < 0) throw SubstraitTranslationException.MalformedPlan("FilterRel missing input.");
+            if (condStart < 0) throw SubstraitTranslationException.MalformedPlan("FilterRel missing condition.");
 
             int p = inputStart;
             var schema = WriteRel(span, ref p, inputStart + inputLen, w);
@@ -542,7 +545,7 @@ namespace KustoAdbc.Substrait
                 }
             }
 
-            if (inputStart < 0) throw new InvalidOperationException("ProjectRel missing input.");
+            if (inputStart < 0) throw SubstraitTranslationException.MalformedPlan("ProjectRel missing input.");
 
             int p = inputStart;
             var schema = WriteRel(span, ref p, inputStart + inputLen, w);
@@ -587,7 +590,7 @@ namespace KustoAdbc.Substrait
                 }
             }
 
-            if (inputStart < 0) throw new InvalidOperationException("FetchRel missing input.");
+            if (inputStart < 0) throw SubstraitTranslationException.MalformedPlan("FetchRel missing input.");
 
             int p = inputStart;
             var schema = WriteRel(span, ref p, inputStart + inputLen, w);
@@ -637,7 +640,7 @@ namespace KustoAdbc.Substrait
                 }
             }
 
-            if (inputStart < 0) throw new InvalidOperationException("SortRel missing input.");
+            if (inputStart < 0) throw SubstraitTranslationException.MalformedPlan("SortRel missing input.");
 
             int p = inputStart;
             var schema = WriteRel(span, ref p, inputStart + inputLen, w);
@@ -680,7 +683,7 @@ namespace KustoAdbc.Substrait
                 }
             }
 
-            if (exprStart < 0) throw new InvalidOperationException("SortField missing expression.");
+            if (exprStart < 0) throw SubstraitTranslationException.MalformedPlan("SortField missing expression.");
 
             int p = exprStart;
             WriteExpression(span, ref p, exprStart + exprLen, w, schema);
@@ -728,7 +731,7 @@ namespace KustoAdbc.Substrait
                 }
             }
 
-            if (inputStart < 0) throw new InvalidOperationException("AggregateRel missing input.");
+            if (inputStart < 0) throw SubstraitTranslationException.MalformedPlan("AggregateRel missing input.");
 
             int p = inputStart;
             var schema = WriteRel(span, ref p, inputStart + inputLen, w);
@@ -834,7 +837,7 @@ namespace KustoAdbc.Substrait
             }
 
             if (leftStart < 0 || rightStart < 0)
-                throw new InvalidOperationException("JoinRel missing left or right input.");
+                throw SubstraitTranslationException.MalformedPlan("JoinRel missing left or right input.");
 
             int p = leftStart;
             var leftSchema = WriteRel(span, ref p, leftStart + leftLen, w);
@@ -928,7 +931,7 @@ namespace KustoAdbc.Substrait
                         break;
                 }
             }
-            w.Write(Utf8KqlWriter.UnknownExpr);
+            throw SubstraitTranslationException.UnsupportedExpression("Expression contains no recognized variant (literal, field reference, scalar function, or if-then).");
         }
 
         void WriteLiteral(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w)
@@ -1024,7 +1027,7 @@ namespace KustoAdbc.Substrait
                     w.WriteFieldRef(fieldIndex);
             }
             else
-                w.Write(Utf8KqlWriter.UnknownField);
+                throw SubstraitTranslationException.UnsupportedExpression("FieldReference has no direct struct field reference.");
         }
 
         int ReadReferenceSegment(ReadOnlySpan<byte> span, ref int pos, int end)
@@ -1104,20 +1107,14 @@ namespace KustoAdbc.Substrait
             }
 
             // Resolve function name from plan extensions
-            if (_functionAnchors.TryGetValue(functionRef, out string? funcSignature)
-                && KqlFunctionMap.TryGet(funcSignature, out var mapping))
-            {
-                WriteResolvedFunction(span, w, mapping, argPositions, schema);
-            }
-            else
-            {
-                // Fallback: emit func_N(args) for unresolved functions
-                w.Write(Utf8KqlWriter.FuncPrefix);
-                w.WriteInt32(functionRef);
-                w.Write((byte)'(');
-                WriteArgList(span, w, argPositions, schema);
-                w.Write((byte)')');
-            }
+            string? funcSignature;
+            if (!_functionAnchors.TryGetValue(functionRef, out funcSignature))
+                throw SubstraitTranslationException.UndeclaredFunction(functionRef);
+
+            if (!KqlFunctionMap.TryGet(funcSignature, out var mapping))
+                throw SubstraitTranslationException.UnsupportedFunction(funcSignature);
+
+            WriteResolvedFunction(span, w, mapping, argPositions, schema);
         }
 
         void WriteResolvedFunction(ReadOnlySpan<byte> span, Utf8KqlWriter w,
@@ -1352,7 +1349,7 @@ namespace KustoAdbc.Substrait
                         break;
                 }
             }
-            w.Write(Utf8KqlWriter.UnknownArg);
+            throw SubstraitTranslationException.UnsupportedExpression("FunctionArgument has no value expression.");
         }
 
         void WriteIfThen(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<Utf8Span>? schema)

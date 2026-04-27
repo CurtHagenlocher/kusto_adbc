@@ -1,12 +1,8 @@
-using System;
-using System.Buffers;
-using System.Collections.Generic;
-using System.IO;
+// Copyright (c) Microsoft Corporation.  All rights reserved.
+
 using System.IO.Pipelines;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
-using System.Threading;
-using System.Threading.Tasks;
 using Apache.Arrow;
 using Apache.Arrow.Ipc;
 

@@ -1,4 +1,5 @@
-using System;
+// Copyright (c) Microsoft Corporation.  All rights reserved.
+
 using System.Runtime.CompilerServices;
 using System.Text;
 

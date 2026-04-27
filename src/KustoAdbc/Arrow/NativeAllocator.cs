@@ -1,10 +1,10 @@
-using System;
+// Copyright (c) Microsoft Corporation.  All rights reserved.
+
 using System.Buffers;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Threading;
 using Apache.Arrow;
 using Apache.Arrow.Memory;
 

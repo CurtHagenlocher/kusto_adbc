@@ -1,5 +1,5 @@
-using System;
-using System.Collections.Generic;
+// Copyright (c) Microsoft Corporation.  All rights reserved.
+
 using Apache.Arrow.Adbc;
 
 namespace KustoAdbc

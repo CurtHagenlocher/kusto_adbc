@@ -1,4 +1,5 @@
-using System.IO;
+// Copyright (c) Microsoft Corporation.  All rights reserved.
+
 using System.Reflection;
 
 namespace KustoAdbc.Substrait

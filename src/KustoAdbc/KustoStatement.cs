@@ -1,6 +1,5 @@
-using System;
-using System.Threading;
-using System.Threading.Tasks;
+// Copyright (c) Microsoft Corporation.  All rights reserved.
+
 using Apache.Arrow;
 using Apache.Arrow.Adbc;
 using Apache.Arrow.Ipc;

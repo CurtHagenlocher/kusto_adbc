@@ -781,5 +781,304 @@ namespace KustoAdbc.Tests
         }
 
         #endregion
+
+        #region Unexpected Field Rejection
+
+        [Fact]
+        public void ReadRel_WithFilter_ThrowsUnexpectedField()
+        {
+            // ReadRel with a filter field (3) should be rejected — silently dropping
+            // a filter on the read would produce incorrect results.
+            var readContent = PB.Cat(
+                PB.LenDel(7, PB.NamedTable("T")),              // named_table
+                PB.LenDel(3, PB.LitBool(true))                 // filter (unsupported)
+            );
+            var plan = BuildPlan(1, readContent);
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("ReadRel", ex.Message);
+        }
+
+        [Fact]
+        public void ReadRel_WithCommon_ThrowsUnexpectedField()
+        {
+            // ReadRel with a common field (1) containing emit remapping
+            var commonContent = PB.Cat(PB.VarField(1, 0)); // dummy emit
+            var readContent = PB.Cat(
+                PB.LenDel(1, commonContent),                    // common
+                PB.LenDel(7, PB.NamedTable("T"))                // named_table
+            );
+            var plan = BuildPlan(1, readContent);
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("ReadRel", ex.Message);
+        }
+
+        [Fact]
+        public void ReadRel_WithProjection_ThrowsUnexpectedField()
+        {
+            // ReadRel with a projection field (5) should be rejected
+            var readContent = PB.Cat(
+                PB.LenDel(7, PB.NamedTable("T")),              // named_table
+                PB.LenDel(5, PB.VarField(1, 0))                // projection (unsupported)
+            );
+            var plan = BuildPlan(1, readContent);
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("ReadRel", ex.Message);
+        }
+
+        [Fact]
+        public void FilterRel_WithCommon_ThrowsUnexpectedField()
+        {
+            // FilterRel with a common field (1) — emit remapping could change output
+            var input = PB.Rel(1, PB.ReadRel("T"));
+            var filterContent = PB.Cat(
+                PB.LenDel(1, PB.VarField(1, 0)),               // common
+                PB.LenDel(2, input),                            // input
+                PB.LenDel(3, PB.LitBool(true))                  // condition
+            );
+            var plan = BuildPlan(2, filterContent);
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("FilterRel", ex.Message);
+        }
+
+        [Fact]
+        public void JoinRel_WithPostJoinFilter_ThrowsUnexpectedField()
+        {
+            // JoinRel with a post_join_filter (field 6) — dropping it is a correctness bug
+            var left = PB.Rel(1, PB.ReadRel("A"));
+            var right = PB.Rel(1, PB.ReadRel("B"));
+            var joinContent = PB.Cat(
+                PB.LenDel(2, left),                             // left
+                PB.LenDel(3, right),                            // right
+                PB.VarField(5, 1),                              // type = inner
+                PB.LenDel(6, PB.LitBool(true))                 // post_join_filter (unsupported)
+            );
+            var plan = BuildPlan(6, joinContent);
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("JoinRel", ex.Message);
+        }
+
+        [Fact]
+        public void JoinRel_WithCommon_ThrowsUnexpectedField()
+        {
+            var left = PB.Rel(1, PB.ReadRel("A"));
+            var right = PB.Rel(1, PB.ReadRel("B"));
+            var joinContent = PB.Cat(
+                PB.LenDel(1, PB.VarField(1, 0)),               // common
+                PB.LenDel(2, left),
+                PB.LenDel(3, right),
+                PB.VarField(5, 1)
+            );
+            var plan = BuildPlan(6, joinContent);
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("JoinRel", ex.Message);
+        }
+
+        [Fact]
+        public void ProjectRel_WithCommon_ThrowsUnexpectedField()
+        {
+            var input = PB.Rel(1, PB.ReadRel("T"));
+            var projectContent = PB.Cat(
+                PB.LenDel(1, PB.VarField(1, 0)),               // common
+                PB.LenDel(2, input),                            // input
+                PB.LenDel(3, PB.FieldRef(0))                    // expression
+            );
+            var plan = BuildPlan(7, projectContent);
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("ProjectRel", ex.Message);
+        }
+
+        [Fact]
+        public void FetchRel_WithCommon_ThrowsUnexpectedField()
+        {
+            var input = PB.Rel(1, PB.ReadRel("T"));
+            var fetchContent = PB.Cat(
+                PB.LenDel(1, PB.VarField(1, 0)),               // common
+                PB.LenDel(2, input),                            // input
+                PB.VarField64(4, 10)                            // count
+            );
+            var plan = BuildPlan(3, fetchContent);
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("FetchRel", ex.Message);
+        }
+
+        [Fact]
+        public void SortRel_WithCommon_ThrowsUnexpectedField()
+        {
+            var input = PB.Rel(1, PB.ReadRel("T"));
+            var sortContent = PB.Cat(
+                PB.LenDel(1, PB.VarField(1, 0)),               // common
+                PB.LenDel(2, input),                            // input
+                PB.LenDel(3, PB.SortField(PB.FieldRef(0), 1))  // sort field
+            );
+            var plan = BuildPlan(5, sortContent);
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("SortRel", ex.Message);
+        }
+
+        [Fact]
+        public void AggregateRel_WithCommon_ThrowsUnexpectedField()
+        {
+            var input = PB.Rel(1, PB.ReadRel("T"));
+            var aggContent = PB.Cat(
+                PB.LenDel(1, PB.VarField(1, 0)),               // common
+                PB.LenDel(2, input)                             // input
+            );
+            var plan = BuildPlan(4, aggContent);
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("AggregateRel", ex.Message);
+        }
+
+        [Fact]
+        public void Expression_CastVariant_ThrowsUnexpectedField()
+        {
+            // Expression with a cast (field 6) instead of a recognized variant
+            var castContent = PB.Cat(
+                PB.LenDel(1, PB.FieldRef(0)),                  // expression to cast
+                PB.LenDel(2, PB.VarField(1, 0))                // target type
+            );
+            var castExpr = PB.LenDel(6, castContent);           // Expression.cast
+            var input = PB.Rel(1, PB.ReadRel("T"));
+            var filter = PB.Cat(PB.LenDel(2, input), PB.LenDel(3, castExpr));
+            var plan = BuildPlan(2, filter);
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("Expression", ex.Message);
+        }
+
+        [Fact]
+        public void Expression_WindowFunction_ThrowsUnexpectedField()
+        {
+            // Expression with a window_function (field 4)
+            var windowContent = PB.VarField(1, 0);              // dummy function_reference
+            var windowExpr = PB.LenDel(4, windowContent);       // Expression.window_function
+            var input = PB.Rel(1, PB.ReadRel("T"));
+            var filter = PB.Cat(PB.LenDel(2, input), PB.LenDel(3, windowExpr));
+            var plan = BuildPlan(2, filter);
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("Expression", ex.Message);
+        }
+
+        [Fact]
+        public void Literal_Timestamp_ThrowsUnsupportedLiteral()
+        {
+            // Literal with a timestamp (field 14) — not a supported literal type
+            var timestampLiteral = PB.LenDel(1, PB.VarField64(14, 1234567890));
+            var input = PB.Rel(1, PB.ReadRel("T"));
+            var filter = PB.Cat(PB.LenDel(2, input), PB.LenDel(3, timestampLiteral));
+            var plan = BuildPlan(2, filter);
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("literal", ex.Message, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
+        public void Literal_Date_ThrowsUnsupportedLiteral()
+        {
+            // Literal with a date (field 16)
+            var dateLiteral = PB.LenDel(1, PB.VarField(16, 19000));
+            var input = PB.Rel(1, PB.ReadRel("T"));
+            var filter = PB.Cat(PB.LenDel(2, input), PB.LenDel(3, dateLiteral));
+            var plan = BuildPlan(2, filter);
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("literal", ex.Message, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
+        public void Literal_Binary_ThrowsUnsupportedLiteral()
+        {
+            // Literal with binary data (field 13)
+            var binaryLiteral = PB.LenDel(1, PB.LenDel(13, new byte[] { 0x01, 0x02 }));
+            var input = PB.Rel(1, PB.ReadRel("T"));
+            var filter = PB.Cat(PB.LenDel(2, input), PB.LenDel(3, binaryLiteral));
+            var plan = BuildPlan(2, filter);
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("literal", ex.Message, StringComparison.OrdinalIgnoreCase);
+        }
+
+        [Fact]
+        public void Measure_WithFilter_ThrowsUnexpectedField()
+        {
+            // Measure with a filter (field 2) — filtered aggregation not supported
+            var measureContent = PB.Cat(
+                PB.LenDel(1, PB.ScalarFunc(100)),               // measure expression
+                PB.LenDel(2, PB.LitBool(true))                  // filter (unsupported)
+            );
+            var input = PB.Rel(1, PB.ReadRel("T"));
+            var aggContent = PB.Cat(
+                PB.LenDel(2, input),
+                PB.LenDel(4, measureContent)
+            );
+
+            var plan = PB.PlanWithExtensions(
+                new[] { PB.ExtUri(1, "extension:io.substrait:functions_aggregate_generic") },
+                new[] { PB.ExtFunc(1, 100, "count_star:") },
+                PB.PlanRel(PB.Rel(4, aggContent)));
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("Measure", ex.Message);
+        }
+
+        [Fact]
+        public void UnsupportedRelation_SetOperation_ThrowsUnsupportedRelation()
+        {
+            // Rel with field 8 (set operation) — not a supported relation type
+            var setContent = PB.VarField(1, 0);
+            var plan = BuildPlan(8, setContent);
+
+            Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+        }
+
+        [Fact]
+        public void FunctionArgument_EnumVariant_ThrowsUnexpectedField()
+        {
+            // FunctionArgument with enum (field 1) instead of value (field 2)
+            var enumArg = PB.LenDel(4, PB.StrField(1, "ROWS")); // FunctionArgument.enum
+            var valueArg = PB.LenDel(4, PB.LenDel(2, PB.FieldRef(0))); // valid FunctionArgument.value
+            var scalarContent = PB.Cat(PB.VarField(1, 100), valueArg, enumArg);
+            var scalarExpr = PB.LenDel(3, scalarContent);
+            var input = PB.Rel(1, PB.ReadRelWithSchema("T", new[] { "x" }));
+            var filter = PB.Cat(PB.LenDel(2, input), PB.LenDel(3, scalarExpr));
+
+            var plan = PB.PlanWithExtensions(
+                new[] { PB.ExtUri(1, "extension:io.substrait:functions_arithmetic") },
+                new[] { PB.ExtFunc(1, 100, "add:i32_i32") },
+                PB.PlanRel(PB.Rel(2, filter)));
+
+            var ex = Assert.Throws<SubstraitTranslationException>(
+                () => SubstraitToKqlTranslator.Translate(plan));
+            Assert.Contains("FunctionArgument", ex.Message);
+        }
+
+        #endregion
     }
 }

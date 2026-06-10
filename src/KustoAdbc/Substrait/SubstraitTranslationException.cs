@@ -43,5 +43,15 @@ namespace KustoAdbc.Substrait
         /// <summary>Expression type not supported.</summary>
         internal static SubstraitTranslationException UnsupportedExpression(string detail)
             => new($"Unsupported Substrait expression: {detail}");
+
+        /// <summary>Plan contains a field that we cannot safely ignore during translation.</summary>
+        internal static SubstraitTranslationException UnexpectedField(string messageName, int fieldNumber)
+            => new($"Unexpected field {fieldNumber} in Substrait {messageName}. " +
+                   $"This field may affect query semantics and cannot be safely ignored.");
+
+        /// <summary>Unsupported literal type.</summary>
+        internal static SubstraitTranslationException UnsupportedLiteral(int fieldNumber)
+            => new($"Unsupported Substrait literal type (field={fieldNumber}). " +
+                   $"Supported: boolean(1), i8(2), i16(3), i32(5), i64(7), fp32(10), fp64(11), string(12), null(26).");
     }
 }

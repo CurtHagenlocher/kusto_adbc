@@ -104,7 +104,7 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 2: // extensions (SimpleExtensionDeclaration)
+                    case SubstraitFields.Plan_ExtensionDeclarations:
                     {
                         int len = ReadVarint32(span, ref pos);
                         int end = pos + len;
@@ -112,7 +112,7 @@ namespace KustoAdbc.Substrait
                         pos = end;
                         break;
                     }
-                    case 3: // relations (PlanRel)
+                    case SubstraitFields.Plan_Relations:
                     {
                         int len = ReadVarint32(span, ref pos);
                         relationPositions.Add((pos, len));
@@ -120,7 +120,7 @@ namespace KustoAdbc.Substrait
                         found = true;
                         break;
                     }
-                    case 8: // extension_urns (SimpleExtensionURN) — in some plan versions
+                    case SubstraitFields.Plan_ExtensionUris:
                     {
                         int len = ReadVarint32(span, ref pos);
                         int end = pos + len;
@@ -128,6 +128,10 @@ namespace KustoAdbc.Substrait
                         pos = end;
                         break;
                     }
+                    case SubstraitFields.Plan_Version:
+                        // Version is informational; safe to skip.
+                        SkipField(span, wireType, ref pos);
+                        break;
                     default:
                         SkipField(span, wireType, ref pos);
                         break;
@@ -154,10 +158,10 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // extension_urn_anchor
+                    case SubstraitFields.ExtensionUri_Anchor:
                         anchor = ReadVarint32(span, ref pos);
                         break;
-                    case 2: // uri
+                    case SubstraitFields.ExtensionUri_Uri:
                     {
                         int len = ReadVarint32(span, ref pos);
 #if NETSTANDARD2_0
@@ -189,7 +193,7 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 3: // extension_function
+                    case SubstraitFields.ExtensionDecl_ExtensionFunction:
                     {
                         int len = ReadVarint32(span, ref pos);
                         int fEnd = pos + len;
@@ -198,6 +202,7 @@ namespace KustoAdbc.Substrait
                         break;
                     }
                     default:
+                        // extension_type and extension_type_variation are safe to skip
                         SkipField(span, wireType, ref pos);
                         break;
                 }
@@ -217,10 +222,10 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 2: // function_anchor
+                    case SubstraitFields.ExtensionFunction_Anchor:
                         anchor = ReadVarint32(span, ref pos);
                         break;
-                    case 3: // name (function signature, e.g., "add:i32_i32")
+                    case SubstraitFields.ExtensionFunction_Name:
                     {
                         int len = ReadVarint32(span, ref pos);
 #if NETSTANDARD2_0
@@ -231,7 +236,7 @@ namespace KustoAdbc.Substrait
                         pos += len;
                         break;
                     }
-                    case 4: // extension_urn_reference
+                    case SubstraitFields.ExtensionFunction_UriReference:
                         ReadVarint32(span, ref pos); // Consumed but not needed for name resolution
                         break;
                     default:
@@ -254,7 +259,7 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // rel
+                    case SubstraitFields.PlanRel_Rel:
                     {
                         int len = ReadVarint32(span, ref pos);
                         int relEnd = pos + len;
@@ -262,7 +267,7 @@ namespace KustoAdbc.Substrait
                         pos = relEnd;
                         return schema;
                     }
-                    case 2: // root (RelRoot)
+                    case SubstraitFields.PlanRel_Root:
                     {
                         int len = ReadVarint32(span, ref pos);
                         int rootEnd = pos + len;
@@ -271,8 +276,7 @@ namespace KustoAdbc.Substrait
                         return schema;
                     }
                     default:
-                        SkipField(span, wireType, ref pos);
-                        break;
+                        throw SubstraitTranslationException.UnexpectedField("PlanRel", fieldNumber);
                 }
             }
             throw SubstraitTranslationException.MalformedPlan("PlanRel has no relation.");
@@ -288,7 +292,7 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // input (Rel)
+                    case SubstraitFields.RelRoot_Input:
                     {
                         int len = ReadVarint32(span, ref pos);
                         int relEnd = pos + len;
@@ -296,9 +300,12 @@ namespace KustoAdbc.Substrait
                         pos = relEnd;
                         return schema;
                     }
-                    default:
+                    case SubstraitFields.RelRoot_Names:
+                        // Output column names — informational for KQL translation.
                         SkipField(span, wireType, ref pos);
                         break;
+                    default:
+                        throw SubstraitTranslationException.UnexpectedField("RelRoot", fieldNumber);
                 }
             }
             throw SubstraitTranslationException.MalformedPlan("RelRoot has no input.");
@@ -317,51 +324,50 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // read
+                    case SubstraitFields.Rel_Read:
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
                         var readSchema = WriteReadRel(span, ref pos, relEnd, w);
                         pos = relEnd;
                         return readSchema;
-                    case 2: // filter
+                    case SubstraitFields.Rel_Filter:
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
                         var filterSchema = WriteFilterRel(span, ref pos, relEnd, w);
                         pos = relEnd;
                         return filterSchema;
-                    case 3: // fetch
+                    case SubstraitFields.Rel_Fetch:
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
                         var fetchSchema = WriteFetchRel(span, ref pos, relEnd, w);
                         pos = relEnd;
                         return fetchSchema;
-                    case 4: // aggregate
+                    case SubstraitFields.Rel_Aggregate:
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
                         var aggSchema = WriteAggregateRel(span, ref pos, relEnd, w);
                         pos = relEnd;
                         return aggSchema;
-                    case 5: // sort
+                    case SubstraitFields.Rel_Sort:
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
                         var sortSchema = WriteSortRel(span, ref pos, relEnd, w);
                         pos = relEnd;
                         return sortSchema;
-                    case 6: // join
+                    case SubstraitFields.Rel_Join:
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
                         var joinSchema = WriteJoinRel(span, ref pos, relEnd, w);
                         pos = relEnd;
                         return joinSchema;
-                    case 7: // project
+                    case SubstraitFields.Rel_Project:
                         len = ReadVarint32(span, ref pos);
                         relEnd = pos + len;
                         var projSchema = WriteProjectRel(span, ref pos, relEnd, w);
                         pos = relEnd;
                         return projSchema;
                     default:
-                        if (fieldNumber > 7 && fieldNumber <= 20)
-                            lastSeenRelField = fieldNumber; // likely an unsupported relation type
+                        lastSeenRelField = fieldNumber;
                         SkipField(span, wireType, ref pos);
                         break;
                 }
@@ -383,7 +389,7 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 2: // base_schema (NamedStruct)
+                    case SubstraitFields.ReadRel_BaseSchema:
                     {
                         int len = ReadVarint32(span, ref pos);
                         int nsEnd = pos + len;
@@ -391,7 +397,7 @@ namespace KustoAdbc.Substrait
                         pos = nsEnd;
                         break;
                     }
-                    case 7: // named_table
+                    case SubstraitFields.ReadRel_NamedTable:
                     {
                         int len = ReadVarint32(span, ref pos);
                         int ntEnd = pos + len;
@@ -399,9 +405,10 @@ namespace KustoAdbc.Substrait
                         pos = ntEnd;
                         break;
                     }
+                    case SubstraitFields.ReadRel_Common:
+                        throw SubstraitTranslationException.UnexpectedField("ReadRel", fieldNumber);
                     default:
-                        SkipField(span, wireType, ref pos);
-                        break;
+                        throw SubstraitTranslationException.UnexpectedField("ReadRel", fieldNumber);
                 }
             }
 
@@ -422,16 +429,19 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // names (repeated string) — store as range into _data
+                    case SubstraitFields.NamedStruct_Names:
                     {
                         int len = ReadVarint32(span, ref pos);
                         names.Add(new Utf8Span(pos, len));
                         pos += len;
                         break;
                     }
-                    default:
+                    case SubstraitFields.NamedStruct_Struct:
+                        // Type information — not needed for name resolution.
                         SkipField(span, wireType, ref pos);
                         break;
+                    default:
+                        throw SubstraitTranslationException.UnexpectedField("NamedStruct", fieldNumber);
                 }
             }
             return names;
@@ -447,16 +457,19 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // names (string) — already UTF-8 in the protobuf
+                    case SubstraitFields.NamedTable_Names:
                     {
                         int len = ReadVarint32(span, ref pos);
                         w.WriteUtf8(span.Slice(pos, len));
                         pos += len;
                         return;
                     }
-                    default:
+                    case SubstraitFields.NamedTable_AdvancedExtension:
+                        // Optional advanced extension — safe to skip.
                         SkipField(span, wireType, ref pos);
                         break;
+                    default:
+                        throw SubstraitTranslationException.UnexpectedField("NamedTable", fieldNumber);
                 }
             }
             throw SubstraitTranslationException.MalformedPlan("NamedTable has no name.");
@@ -481,14 +494,14 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 2: // input
+                    case SubstraitFields.FilterRel_Input:
                     {
                         int len = ReadVarint32(span, ref pos);
                         inputStart = pos; inputLen = len;
                         pos += len;
                         break;
                     }
-                    case 3: // condition
+                    case SubstraitFields.FilterRel_Condition:
                     {
                         int len = ReadVarint32(span, ref pos);
                         condStart = pos; condLen = len;
@@ -496,8 +509,7 @@ namespace KustoAdbc.Substrait
                         break;
                     }
                     default:
-                        SkipField(span, wireType, ref pos);
-                        break;
+                        throw SubstraitTranslationException.UnexpectedField("FilterRel", fieldNumber);
                 }
             }
 
@@ -526,14 +538,14 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 2:
+                    case SubstraitFields.ProjectRel_Input:
                     {
                         int len = ReadVarint32(span, ref pos);
                         inputStart = pos; inputLen = len;
                         pos += len;
                         break;
                     }
-                    case 3:
+                    case SubstraitFields.ProjectRel_Expressions:
                     {
                         int len = ReadVarint32(span, ref pos);
                         exprPositions.Add((pos, len));
@@ -541,8 +553,7 @@ namespace KustoAdbc.Substrait
                         break;
                     }
                     default:
-                        SkipField(span, wireType, ref pos);
-                        break;
+                        throw SubstraitTranslationException.UnexpectedField("ProjectRel", fieldNumber);
                 }
             }
 
@@ -578,16 +589,16 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 2:
+                    case SubstraitFields.FetchRel_Input:
                     {
                         int len = ReadVarint32(span, ref pos);
                         inputStart = pos; inputLen = len;
                         pos += len;
                         break;
                     }
-                    case 3: offset = ReadVarint64(span, ref pos); break;
-                    case 4: count = ReadVarint64(span, ref pos); break;
-                    default: SkipField(span, wireType, ref pos); break;
+                    case SubstraitFields.FetchRel_Offset: offset = ReadVarint64(span, ref pos); break;
+                    case SubstraitFields.FetchRel_Count: count = ReadVarint64(span, ref pos); break;
+                    default: throw SubstraitTranslationException.UnexpectedField("FetchRel", fieldNumber);
                 }
             }
 
@@ -623,21 +634,21 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 2:
+                    case SubstraitFields.SortRel_Input:
                     {
                         int len = ReadVarint32(span, ref pos);
                         inputStart = pos; inputLen = len;
                         pos += len;
                         break;
                     }
-                    case 3:
+                    case SubstraitFields.SortRel_Sorts:
                     {
                         int len = ReadVarint32(span, ref pos);
                         sortPositions.Add((pos, len));
                         pos += len;
                         break;
                     }
-                    default: SkipField(span, wireType, ref pos); break;
+                    default: throw SubstraitTranslationException.UnexpectedField("SortRel", fieldNumber);
                 }
             }
 
@@ -672,15 +683,15 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1:
+                    case SubstraitFields.SortField_Expr:
                     {
                         int len = ReadVarint32(span, ref pos);
                         exprStart = pos; exprLen = len;
                         pos += len;
                         break;
                     }
-                    case 2: direction = ReadVarint32(span, ref pos); break;
-                    default: SkipField(span, wireType, ref pos); break;
+                    case SubstraitFields.SortField_Direction: direction = ReadVarint32(span, ref pos); break;
+                    default: throw SubstraitTranslationException.UnexpectedField("SortField", fieldNumber);
                 }
             }
 
@@ -707,28 +718,28 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 2:
+                    case SubstraitFields.AggregateRel_Input:
                     {
                         int len = ReadVarint32(span, ref pos);
                         inputStart = pos; inputLen = len;
                         pos += len;
                         break;
                     }
-                    case 3:
+                    case SubstraitFields.AggregateRel_Groupings:
                     {
                         int len = ReadVarint32(span, ref pos);
                         groupPositions.Add((pos, len));
                         pos += len;
                         break;
                     }
-                    case 4:
+                    case SubstraitFields.AggregateRel_Measures:
                     {
                         int len = ReadVarint32(span, ref pos);
                         measurePositions.Add((pos, len));
                         pos += len;
                         break;
                     }
-                    default: SkipField(span, wireType, ref pos); break;
+                    default: throw SubstraitTranslationException.UnexpectedField("AggregateRel", fieldNumber);
                 }
             }
 
@@ -769,7 +780,7 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // grouping_expressions
+                    case SubstraitFields.Grouping_GroupingExpressions:
                     {
                         int len = ReadVarint32(span, ref pos);
                         if (first) { w.Write(Utf8KqlWriter.SummarizeBy); first = false; }
@@ -780,8 +791,7 @@ namespace KustoAdbc.Substrait
                         break;
                     }
                     default:
-                        SkipField(span, wireType, ref pos);
-                        break;
+                        throw SubstraitTranslationException.UnexpectedField("Grouping", fieldNumber);
                 }
             }
         }
@@ -797,7 +807,7 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // measure expression
+                    case SubstraitFields.Measure_Measure:
                     {
                         int len = ReadVarint32(span, ref pos);
                         int exprEnd = pos + len;
@@ -806,9 +816,10 @@ namespace KustoAdbc.Substrait
                         found = true;
                         break;
                     }
+                    case SubstraitFields.Measure_Filter:
+                        throw SubstraitTranslationException.UnexpectedField("Measure", fieldNumber);
                     default:
-                        SkipField(span, wireType, ref pos);
-                        break;
+                        throw SubstraitTranslationException.UnexpectedField("Measure", fieldNumber);
                 }
             }
             if (!found) w.Write(Utf8KqlWriter.CountFunc);
@@ -829,11 +840,11 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 2: { int len = ReadVarint32(span, ref pos); leftStart = pos; leftLen = len; pos += len; break; }
-                    case 3: { int len = ReadVarint32(span, ref pos); rightStart = pos; rightLen = len; pos += len; break; }
-                    case 4: { int len = ReadVarint32(span, ref pos); condStart = pos; condLen = len; pos += len; break; }
-                    case 5: joinType = ReadVarint32(span, ref pos); break;
-                    default: SkipField(span, wireType, ref pos); break;
+                    case SubstraitFields.JoinRel_Left: { int len = ReadVarint32(span, ref pos); leftStart = pos; leftLen = len; pos += len; break; }
+                    case SubstraitFields.JoinRel_Right: { int len = ReadVarint32(span, ref pos); rightStart = pos; rightLen = len; pos += len; break; }
+                    case SubstraitFields.JoinRel_Expression: { int len = ReadVarint32(span, ref pos); condStart = pos; condLen = len; pos += len; break; }
+                    case SubstraitFields.JoinRel_Type: joinType = ReadVarint32(span, ref pos); break;
+                    default: throw SubstraitTranslationException.UnexpectedField("JoinRel", fieldNumber);
                 }
             }
 
@@ -903,33 +914,32 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // literal
+                    case SubstraitFields.Expression_Literal:
                         len = ReadVarint32(span, ref pos);
                         exprEnd = pos + len;
                         WriteLiteral(span, ref pos, exprEnd, w);
                         pos = exprEnd;
                         return;
-                    case 2: // selection (FieldReference)
+                    case SubstraitFields.Expression_Selection:
                         len = ReadVarint32(span, ref pos);
                         exprEnd = pos + len;
                         WriteFieldReference(span, ref pos, exprEnd, w, schema);
                         pos = exprEnd;
                         return;
-                    case 3: // scalar_function
+                    case SubstraitFields.Expression_ScalarFunction:
                         len = ReadVarint32(span, ref pos);
                         exprEnd = pos + len;
                         WriteScalarFunction(span, ref pos, exprEnd, w, schema);
                         pos = exprEnd;
                         return;
-                    case 5: // if_then
+                    case SubstraitFields.Expression_IfThen:
                         len = ReadVarint32(span, ref pos);
                         exprEnd = pos + len;
                         WriteIfThen(span, ref pos, exprEnd, w, schema);
                         pos = exprEnd;
                         return;
                     default:
-                        SkipField(span, wireType, ref pos);
-                        break;
+                        throw SubstraitTranslationException.UnexpectedField("Expression", fieldNumber);
                 }
             }
             throw SubstraitTranslationException.UnsupportedExpression("Expression contains no recognized variant (literal, field reference, scalar function, or if-then).");
@@ -945,18 +955,18 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // boolean
+                    case SubstraitFields.Literal_Boolean:
                         w.Write(ReadVarint32(span, ref pos) != 0 ? Utf8KqlWriter.True : Utf8KqlWriter.False);
                         return;
-                    case 2: // i8
-                    case 3: // i16
-                    case 5: // i32
+                    case SubstraitFields.Literal_I8:
+                    case SubstraitFields.Literal_I16:
+                    case SubstraitFields.Literal_I32:
                         w.WriteInt32(ReadVarint32(span, ref pos));
                         return;
-                    case 7: // i64
+                    case SubstraitFields.Literal_I64:
                         w.WriteInt64(ReadVarint64(span, ref pos));
                         return;
-                    case 10: // fp32
+                    case SubstraitFields.Literal_Fp32:
                     {
                         int bits = ReadFixed32(span, ref pos);
 #if NETSTANDARD2_0
@@ -967,20 +977,20 @@ namespace KustoAdbc.Substrait
                         w.WriteFloat(f);
                         return;
                     }
-                    case 11: // fp64
+                    case SubstraitFields.Literal_Fp64:
                     {
                         long bits = ReadFixed64(span, ref pos);
                         w.WriteDouble(BitConverter.Int64BitsToDouble(bits));
                         return;
                     }
-                    case 12: // string — the protobuf bytes are already UTF-8
+                    case SubstraitFields.Literal_String:
                     {
                         int len = ReadVarint32(span, ref pos);
                         w.WriteKqlStringLiteral(span.Slice(pos, len));
                         pos += len;
                         return;
                     }
-                    case 26: // null
+                    case SubstraitFields.Literal_Null:
                     {
                         int len = ReadVarint32(span, ref pos);
                         pos += len;
@@ -988,11 +998,10 @@ namespace KustoAdbc.Substrait
                         return;
                     }
                     default:
-                        SkipField(span, wireType, ref pos);
-                        break;
+                        throw SubstraitTranslationException.UnsupportedLiteral(fieldNumber);
                 }
             }
-            w.Write(Utf8KqlWriter.DynamicNull);
+            throw SubstraitTranslationException.MalformedPlan("Literal has no value.");
         }
 
         void WriteFieldReference(ReadOnlySpan<byte> span, ref int pos, int end, Utf8KqlWriter w, List<Utf8Span>? schema)
@@ -1006,7 +1015,7 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // direct_reference
+                    case SubstraitFields.FieldReference_DirectReference:
                     {
                         int len = ReadVarint32(span, ref pos);
                         int refEnd = pos + len;
@@ -1014,9 +1023,12 @@ namespace KustoAdbc.Substrait
                         pos = refEnd;
                         break;
                     }
-                    default:
+                    case SubstraitFields.FieldReference_RootReference:
+                        // Root reference type indicator — safe to skip.
                         SkipField(span, wireType, ref pos);
                         break;
+                    default:
+                        throw SubstraitTranslationException.UnexpectedField("FieldReference", fieldNumber);
                 }
             }
 
@@ -1041,14 +1053,14 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1:
-                    case 2:
+                    case SubstraitFields.ReferenceSegment_MapKey:
+                    case SubstraitFields.ReferenceSegment_ListElement:
                     {
                         int len = ReadVarint32(span, ref pos);
                         pos += len;
                         break;
                     }
-                    case 3: // struct_field
+                    case SubstraitFields.ReferenceSegment_StructField:
                     {
                         int len = ReadVarint32(span, ref pos);
                         int sfEnd = pos + len;
@@ -1057,8 +1069,7 @@ namespace KustoAdbc.Substrait
                         return index;
                     }
                     default:
-                        SkipField(span, wireType, ref pos);
-                        break;
+                        throw SubstraitTranslationException.UnexpectedField("ReferenceSegment", fieldNumber);
                 }
             }
             return -1;
@@ -1075,8 +1086,13 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: fieldIndex = ReadVarint32(span, ref pos); break;
-                    default: SkipField(span, wireType, ref pos); break;
+                    case SubstraitFields.StructField_Field: fieldIndex = ReadVarint32(span, ref pos); break;
+                    case SubstraitFields.StructField_Child:
+                        // Nested child reference — not supported in flat column access.
+                        SkipField(span, wireType, ref pos);
+                        break;
+                    default:
+                        throw SubstraitTranslationException.UnexpectedField("StructField", fieldNumber);
                 }
             }
             return fieldIndex;
@@ -1095,15 +1111,20 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: functionRef = ReadVarint32(span, ref pos); break;
-                    case 4:
+                    case SubstraitFields.ScalarFunction_FunctionReference: functionRef = ReadVarint32(span, ref pos); break;
+                    case SubstraitFields.ScalarFunction_Arguments:
                     {
                         int len = ReadVarint32(span, ref pos);
                         argPositions.Add((pos, len));
                         pos += len;
                         break;
                     }
-                    default: SkipField(span, wireType, ref pos); break;
+                    case SubstraitFields.ScalarFunction_OutputType:
+                    case SubstraitFields.ScalarFunction_Options:
+                        // Output type and options — safe to skip for KQL translation.
+                        SkipField(span, wireType, ref pos);
+                        break;
+                    default: throw SubstraitTranslationException.UnexpectedField("ScalarFunction", fieldNumber);
                 }
             }
 
@@ -1337,7 +1358,7 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 2: // value (Expression)
+                    case SubstraitFields.FunctionArgument_Value:
                     {
                         int len = ReadVarint32(span, ref pos);
                         int exprEnd = pos + len;
@@ -1346,8 +1367,7 @@ namespace KustoAdbc.Substrait
                         return;
                     }
                     default:
-                        SkipField(span, wireType, ref pos);
-                        break;
+                        throw SubstraitTranslationException.UnexpectedField("FunctionArgument", fieldNumber);
                 }
             }
             throw SubstraitTranslationException.UnsupportedExpression("FunctionArgument has no value expression.");
@@ -1366,21 +1386,21 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1:
+                    case SubstraitFields.IfThen_Ifs:
                     {
                         int len = ReadVarint32(span, ref pos);
                         clausePositions.Add((pos, len));
                         pos += len;
                         break;
                     }
-                    case 2:
+                    case SubstraitFields.IfThen_Else:
                     {
                         int len = ReadVarint32(span, ref pos);
                         elseStart = pos; elseLen = len;
                         pos += len;
                         break;
                     }
-                    default: SkipField(span, wireType, ref pos); break;
+                    default: throw SubstraitTranslationException.UnexpectedField("IfThen", fieldNumber);
                 }
             }
 
@@ -1414,9 +1434,9 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: { int len = ReadVarint32(span, ref pos); condStart = pos; condLen = len; pos += len; break; }
-                    case 2: { int len = ReadVarint32(span, ref pos); thenStart = pos; thenLen = len; pos += len; break; }
-                    default: SkipField(span, wireType, ref pos); break;
+                    case SubstraitFields.IfClause_If: { int len = ReadVarint32(span, ref pos); condStart = pos; condLen = len; pos += len; break; }
+                    case SubstraitFields.IfClause_Then: { int len = ReadVarint32(span, ref pos); thenStart = pos; thenLen = len; pos += len; break; }
+                    default: throw SubstraitTranslationException.UnexpectedField("IfClause", fieldNumber);
                 }
             }
 

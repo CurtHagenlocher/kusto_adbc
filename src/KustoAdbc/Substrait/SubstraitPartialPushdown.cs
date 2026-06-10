@@ -86,7 +86,7 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 2: // extensions
+                    case SubstraitFields.Plan_ExtensionDeclarations:
                     {
                         int len = ReadVarint32(span, ref pos);
                         int end = pos + len;
@@ -95,14 +95,14 @@ namespace KustoAdbc.Substrait
                         pos = end;
                         break;
                     }
-                    case 3: // relations
+                    case SubstraitFields.Plan_Relations:
                     {
                         int len = ReadVarint32(span, ref pos);
                         relationPositions.Add((pos, len));
                         pos += len;
                         break;
                     }
-                    case 8: // extension_urns
+                    case SubstraitFields.Plan_ExtensionUris:
                     {
                         int len = ReadVarint32(span, ref pos);
                         int end = pos + len;
@@ -160,7 +160,7 @@ namespace KustoAdbc.Substrait
                 var planRelContent = new ProtobufWriter(rLen + 64);
                 int p = rStart;
                 WritePartialPlanRel(_data, ref p, rStart + rLen, planRelContent);
-                output.WriteLengthDelimited(3, planRelContent);
+                output.WriteLengthDelimited(SubstraitFields.Plan_Relations, planRelContent);
             }
 
             return new PushdownResult(output.WrittenMemory, false, null);
@@ -180,23 +180,23 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // rel
+                    case SubstraitFields.PlanRel_Rel:
                     {
                         int len = ReadVarint32(span, ref pos);
                         var relWriter = new ProtobufWriter(len + 32);
                         int p = pos;
                         WritePartialRel(data, ref p, pos + len, relWriter);
-                        output.WriteLengthDelimited(1, relWriter);
+                        output.WriteLengthDelimited(SubstraitFields.PlanRel_Rel, relWriter);
                         pos += len;
                         return;
                     }
-                    case 2: // root
+                    case SubstraitFields.PlanRel_Root:
                     {
                         int len = ReadVarint32(span, ref pos);
                         var rootWriter = new ProtobufWriter(len + 32);
                         int p = pos;
                         WritePartialRelRoot(data, ref p, pos + len, rootWriter);
-                        output.WriteLengthDelimited(2, rootWriter);
+                        output.WriteLengthDelimited(SubstraitFields.PlanRel_Root, rootWriter);
                         pos += len;
                         return;
                     }
@@ -220,13 +220,13 @@ namespace KustoAdbc.Substrait
 
                 switch (fieldNumber)
                 {
-                    case 1: // input (Rel)
+                    case SubstraitFields.RelRoot_Input:
                     {
                         int len = ReadVarint32(span, ref pos);
                         var relWriter = new ProtobufWriter(len + 32);
                         int p = pos;
                         WritePartialRel(data, ref p, pos + len, relWriter);
-                        output.WriteLengthDelimited(1, relWriter);
+                        output.WriteLengthDelimited(SubstraitFields.RelRoot_Input, relWriter);
                         pos += len;
                         break;
                     }
@@ -261,7 +261,7 @@ namespace KustoAdbc.Substrait
                 int fieldNumber = tag >> 3;
                 int wireType = tag & 0x7;
 
-                if (fieldNumber >= 1 && fieldNumber <= 20 && wireType == 2)
+                if (fieldNumber >= SubstraitFields.Rel_Read && fieldNumber <= 20 && wireType == 2)
                 {
                     int len = ReadVarint32(span, ref innerPos);
                     int relContentEnd = innerPos + len;
@@ -316,19 +316,19 @@ namespace KustoAdbc.Substrait
 
         static HashSet<int> GetChildRelFields(int relType) => relType switch
         {
-            1 => s_noChildren,
-            2 => s_singleInput,    // FilterRel: input=2
-            3 => s_singleInput,    // FetchRel: input=2
-            4 => s_singleInput,    // AggregateRel: input=2
-            5 => s_singleInput,    // SortRel: input=2
-            6 => s_joinInputs,     // JoinRel: left=2, right=3
-            7 => s_singleInput,    // ProjectRel: input=2
+            SubstraitFields.Rel_Read => s_noChildren,
+            SubstraitFields.Rel_Filter => s_singleInput,     // FilterRel: input=2
+            SubstraitFields.Rel_Fetch => s_singleInput,      // FetchRel: input=2
+            SubstraitFields.Rel_Aggregate => s_singleInput,  // AggregateRel: input=2
+            SubstraitFields.Rel_Sort => s_singleInput,       // SortRel: input=2
+            SubstraitFields.Rel_Join => s_joinInputs,        // JoinRel: left=2, right=3
+            SubstraitFields.Rel_Project => s_singleInput,    // ProjectRel: input=2
             _ => s_noChildren,
         };
 
         static readonly HashSet<int> s_noChildren = new();
-        static readonly HashSet<int> s_singleInput = new() { 2 };
-        static readonly HashSet<int> s_joinInputs = new() { 2, 3 };
+        static readonly HashSet<int> s_singleInput = new() { SubstraitFields.FilterRel_Input };
+        static readonly HashSet<int> s_joinInputs = new() { SubstraitFields.JoinRel_Left, SubstraitFields.JoinRel_Right };
 
         #endregion
 
@@ -367,23 +367,22 @@ namespace KustoAdbc.Substrait
 
         void WriteKqlReadRel(ProtobufWriter output, string kql)
         {
-            // Rel.read = field 1
             var namedTableContent = new ProtobufWriter(kql.Length + 32);
-            namedTableContent.WriteStringField(1, SubstraitPartialPushdown.KqlFunctionName);
-            namedTableContent.WriteStringField(1, kql);
+            namedTableContent.WriteStringField(SubstraitFields.NamedTable_Names, SubstraitPartialPushdown.KqlFunctionName);
+            namedTableContent.WriteStringField(SubstraitFields.NamedTable_Names, kql);
 
             var readRelContent = new ProtobufWriter(namedTableContent.Length + 8);
-            readRelContent.WriteLengthDelimited(7, namedTableContent); // named_table
+            readRelContent.WriteLengthDelimited(SubstraitFields.ReadRel_NamedTable, namedTableContent);
 
-            output.WriteLengthDelimited(1, readRelContent); // Rel.read
+            output.WriteLengthDelimited(SubstraitFields.Rel_Read, readRelContent);
         }
 
         void WriteKqlExtUri(ProtobufWriter output)
         {
             var uriContent = new ProtobufWriter(64);
-            uriContent.WriteVarintField(1, SubstraitPartialPushdown.KqlUriAnchor);
-            uriContent.WriteStringField(2, SubstraitPartialPushdown.KqlExtensionUri);
-            output.WriteLengthDelimited(8, uriContent);
+            uriContent.WriteVarintField(SubstraitFields.ExtensionUri_Anchor, SubstraitPartialPushdown.KqlUriAnchor);
+            uriContent.WriteStringField(SubstraitFields.ExtensionUri_Uri, SubstraitPartialPushdown.KqlExtensionUri);
+            output.WriteLengthDelimited(SubstraitFields.Plan_ExtensionUris, uriContent);
         }
 
         byte[] BuildFullyPushedPlan(Utf8KqlWriter kql)
@@ -395,12 +394,12 @@ namespace KustoAdbc.Substrait
             WriteKqlReadRel(relWriter, kql.ToString());
 
             var rootWriter = new ProtobufWriter(relWriter.Length + 8);
-            rootWriter.WriteLengthDelimited(1, relWriter); // RelRoot.input
+            rootWriter.WriteLengthDelimited(SubstraitFields.RelRoot_Input, relWriter);
 
             var planRelWriter = new ProtobufWriter(rootWriter.Length + 8);
-            planRelWriter.WriteLengthDelimited(2, rootWriter); // PlanRel.root
+            planRelWriter.WriteLengthDelimited(SubstraitFields.PlanRel_Root, rootWriter);
 
-            output.WriteLengthDelimited(3, planRelWriter); // Plan.relations
+            output.WriteLengthDelimited(SubstraitFields.Plan_Relations, planRelWriter);
 
             return output.ToArray();
         }
@@ -418,8 +417,8 @@ namespace KustoAdbc.Substrait
                 int fn = tag >> 3; int wt = tag & 0x7;
                 switch (fn)
                 {
-                    case 1: anchor = ReadVarint32(span, ref pos); break;
-                    case 2:
+                    case SubstraitFields.ExtensionUri_Anchor: anchor = ReadVarint32(span, ref pos); break;
+                    case SubstraitFields.ExtensionUri_Uri:
                         int len = ReadVarint32(span, ref pos);
 #if NETSTANDARD2_0
                         uri = Encoding.UTF8.GetString(span.Slice(pos, len).ToArray());
@@ -440,7 +439,7 @@ namespace KustoAdbc.Substrait
             {
                 int tag = ReadTag(span, ref pos);
                 int fn = tag >> 3; int wt = tag & 0x7;
-                if (fn == 3 && wt == 2) // extension_function
+                if (fn == SubstraitFields.ExtensionDecl_ExtensionFunction && wt == 2)
                 {
                     int len = ReadVarint32(span, ref pos);
                     int fEnd = pos + len;
@@ -451,8 +450,8 @@ namespace KustoAdbc.Substrait
                         int fn2 = t2 >> 3; int wt2 = t2 & 0x7;
                         switch (fn2)
                         {
-                            case 2: anchor = ReadVarint32(span, ref pos); break;
-                            case 3:
+                            case SubstraitFields.ExtensionFunction_Anchor: anchor = ReadVarint32(span, ref pos); break;
+                            case SubstraitFields.ExtensionFunction_Name:
                                 int slen = ReadVarint32(span, ref pos);
 #if NETSTANDARD2_0
                                 name = Encoding.UTF8.GetString(span.Slice(pos, slen).ToArray());

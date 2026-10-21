@@ -6,15 +6,28 @@ namespace KustoAdbc.Substrait
     /// <summary>
     /// Named constants for Substrait protobuf field numbers.
     /// These correspond to the field numbers defined in the Substrait .proto schema
-    /// and are used in place of raw numeric literals when parsing protobuf wire format.
+    /// (substrait-io/substrait v0.107, proto/substrait/*.proto) and are used in place
+    /// of raw numeric literals when parsing protobuf wire format.
+    /// Fields marked "legacy" are reserved in the current proto but are still
+    /// emitted by older producers, so they are accepted on input.
     /// </summary>
     internal static class SubstraitFields
     {
         // ── Plan ───────────────────────────────────────────────────────
-        public const int Plan_Version = 1;
+        public const int Plan_ExtensionUris = 1;            // legacy (SimpleExtensionURI)
         public const int Plan_ExtensionDeclarations = 2;
         public const int Plan_Relations = 3;
-        public const int Plan_ExtensionUris = 8;
+        public const int Plan_AdvancedExtensions = 4;
+        public const int Plan_ExpectedTypeUrls = 5;
+        public const int Plan_Version = 6;
+        public const int Plan_ParameterBindings = 7;
+        public const int Plan_ExtensionUrns = 8;
+        public const int Plan_TypeAliases = 9;
+        public const int Plan_ExecutionBehavior = 10;
+        public const int Plan_NamedLambdas = 11;
+
+        // ── ExecutionBehavior ──────────────────────────────────────────
+        public const int ExecutionBehavior_VariableEvalMode = 1;
 
         // ── PlanRel ────────────────────────────────────────────────────
         public const int PlanRel_Rel = 1;
@@ -32,17 +45,51 @@ namespace KustoAdbc.Substrait
         public const int Rel_Sort = 5;
         public const int Rel_Join = 6;
         public const int Rel_Project = 7;
+        public const int Rel_Set = 8;
+        public const int Rel_ExtensionSingle = 9;
+        public const int Rel_ExtensionMulti = 10;
+        public const int Rel_ExtensionLeaf = 11;
+        public const int Rel_Cross = 12;
+        public const int Rel_HashJoin = 13;
+        public const int Rel_MergeJoin = 14;
+        public const int Rel_Exchange = 15;
+        public const int Rel_Expand = 16;
+        public const int Rel_Window = 17;
+        public const int Rel_NestedLoopJoin = 18;
+        public const int Rel_Write = 19;
+        public const int Rel_Ddl = 20;
+        public const int Rel_Reference = 21;
+        public const int Rel_Update = 22;
+        public const int Rel_TopN = 23;
+        public const int Rel_LateralJoin = 24;
 
         // ── RelCommon ──────────────────────────────────────────────────
-        public const int RelCommon = 1;
+        public const int RelCommon_Direct = 1;
+        public const int RelCommon_Emit = 2;
+        public const int RelCommon_Hint = 3;
+        public const int RelCommon_AdvancedExtension = 4;
+        public const int RelCommon_RelAnchor = 5;
+        public const int Emit_OutputMapping = 1;
+
+        // ── AdvancedExtension ──────────────────────────────────────────
+        public const int AdvancedExtension_Optimization = 1;
+        public const int AdvancedExtension_Enhancement = 2;
+
+        // Every relation message uses this field number for advanced_extension
+        // (TopNRel is the exception, see TopNRel_AdvancedExtension).
+        public const int Rel_AdvancedExtension = 10;
 
         // ── ReadRel ────────────────────────────────────────────────────
         public const int ReadRel_Common = 1;
         public const int ReadRel_BaseSchema = 2;
         public const int ReadRel_Filter = 3;
-        public const int ReadRel_BestEffortFilter = 4;
-        public const int ReadRel_Projection = 5;
+        public const int ReadRel_Projection = 4;
+        public const int ReadRel_VirtualTable = 5;
+        public const int ReadRel_LocalFiles = 6;
         public const int ReadRel_NamedTable = 7;
+        public const int ReadRel_ExtensionTable = 8;
+        public const int ReadRel_IcebergTable = 9;
+        public const int ReadRel_BestEffortFilter = 11;
 
         // ── FilterRel ──────────────────────────────────────────────────
         public const int FilterRel_Common = 1;
@@ -52,8 +99,10 @@ namespace KustoAdbc.Substrait
         // ── FetchRel ───────────────────────────────────────────────────
         public const int FetchRel_Common = 1;
         public const int FetchRel_Input = 2;
-        public const int FetchRel_Offset = 3;
-        public const int FetchRel_Count = 4;
+        public const int FetchRel_Offset = 3;               // legacy int64
+        public const int FetchRel_Count = 4;                // legacy int64
+        public const int FetchRel_OffsetExpr = 5;
+        public const int FetchRel_CountExpr = 6;
 
         // ── ProjectRel ─────────────────────────────────────────────────
         public const int ProjectRel_Common = 1;
@@ -70,38 +119,113 @@ namespace KustoAdbc.Substrait
         public const int AggregateRel_Input = 2;
         public const int AggregateRel_Groupings = 3;
         public const int AggregateRel_Measures = 4;
+        public const int AggregateRel_GroupingExpressions = 5;
+
+        // ── AggregateRel.Grouping ──────────────────────────────────────
+        public const int Grouping_GroupingExpressions = 1;  // legacy inline expressions
+        public const int Grouping_ExpressionReferences = 2;
+
+        // ── AggregateRel.Measure ───────────────────────────────────────
+        public const int Measure_Measure = 1;
+        public const int Measure_Filter = 2;
+
+        // ── AggregateFunction ──────────────────────────────────────────
+        public const int AggregateFunction_FunctionReference = 1;
+        public const int AggregateFunction_Args = 2;        // legacy
+        public const int AggregateFunction_Sorts = 3;
+        public const int AggregateFunction_Phase = 4;
+        public const int AggregateFunction_OutputType = 5;
+        public const int AggregateFunction_Invocation = 6;
+        public const int AggregateFunction_Arguments = 7;
+        public const int AggregateFunction_Options = 8;
+
+        public const int AggregationPhase_Unspecified = 0;
+        public const int AggregationPhase_InitialToResult = 3;
+        public const int AggregationInvocation_Unspecified = 0;
+        public const int AggregationInvocation_All = 1;
+        public const int AggregationInvocation_Distinct = 2;
 
         // ── JoinRel ────────────────────────────────────────────────────
         public const int JoinRel_Common = 1;
         public const int JoinRel_Left = 2;
         public const int JoinRel_Right = 3;
         public const int JoinRel_Expression = 4;
-        public const int JoinRel_Type = 5;
-        public const int JoinRel_PostJoinFilter = 6;
+        public const int JoinRel_PostJoinFilter = 5;
+        public const int JoinRel_Type = 6;
+
+        public const int JoinType_Unspecified = 0;
+        public const int JoinType_Inner = 1;
+        public const int JoinType_Outer = 2;
+        public const int JoinType_Left = 3;
+        public const int JoinType_Right = 4;
+        public const int JoinType_LeftSemi = 5;
+        public const int JoinType_LeftAnti = 6;
+        public const int JoinType_LeftSingle = 7;
+        public const int JoinType_RightSemi = 8;
+        public const int JoinType_RightAnti = 9;
+
+        // ── CrossRel ───────────────────────────────────────────────────
+        public const int CrossRel_Common = 1;
+        public const int CrossRel_Left = 2;
+        public const int CrossRel_Right = 3;
+
+        // ── SetRel ─────────────────────────────────────────────────────
+        public const int SetRel_Common = 1;
+        public const int SetRel_Inputs = 2;
+        public const int SetRel_Op = 3;
+
+        public const int SetOp_UnionDistinct = 5;
+        public const int SetOp_UnionAll = 6;
+
+        // ── TopNRel ────────────────────────────────────────────────────
+        public const int TopNRel_Common = 1;
+        public const int TopNRel_Input = 2;
+        public const int TopNRel_Sorts = 3;
+        public const int TopNRel_Offset = 4;
+        public const int TopNRel_Count = 5;
+        public const int TopNRel_Mode = 6;
+        public const int TopNRel_AdvancedExtension = 7;
+
+        public const int FetchMode_Unspecified = 0;
+        public const int FetchMode_RowsOnly = 1;
+
+        // ── Child input fields of relations not translated directly
+        //    (used by partial pushdown to recurse through them) ─────────
+        public const int SingleInputRel_Input = 2;
+        public const int MultiInputRel_Inputs = 2;
+        public const int BiRel_Left = 2;
+        public const int BiRel_Right = 3;
 
         // ── SortField ──────────────────────────────────────────────────
         public const int SortField_Expr = 1;
         public const int SortField_Direction = 2;
+        public const int SortField_ComparisonFunctionReference = 3;
 
-        // ── Grouping ───────────────────────────────────────────────────
-        public const int Grouping_GroupingExpressions = 1;
-
-        // ── Measure ────────────────────────────────────────────────────
-        public const int Measure_Measure = 1;
-        public const int Measure_Filter = 2;
+        public const int SortDirection_Unspecified = 0;
+        public const int SortDirection_AscNullsFirst = 1;
+        public const int SortDirection_AscNullsLast = 2;
+        public const int SortDirection_DescNullsFirst = 3;
+        public const int SortDirection_DescNullsLast = 4;
+        public const int SortDirection_Clustered = 5;
 
         // ── Expression (oneof rex_type) ────────────────────────────────
         public const int Expression_Literal = 1;
         public const int Expression_Selection = 2;
         public const int Expression_ScalarFunction = 3;
-        public const int Expression_WindowFunction = 4;
-        public const int Expression_IfThen = 5;
-        public const int Expression_Cast = 6;
-        public const int Expression_Subquery = 7;
+        public const int Expression_WindowFunction = 5;
+        public const int Expression_IfThen = 6;
+        public const int Expression_SwitchExpression = 7;
         public const int Expression_SingularOrList = 8;
         public const int Expression_MultiOrList = 9;
-        public const int Expression_Nested = 11;
-        public const int Expression_Enum = 10;
+        public const int Expression_Cast = 11;
+        public const int Expression_Subquery = 12;
+        public const int Expression_Nested = 13;
+        public const int Expression_DynamicParameter = 14;
+        public const int Expression_Lambda = 15;
+        public const int Expression_LambdaInvocation = 16;
+        public const int Expression_ExecutionContextVariable = 17;
+        public const int Expression_DetachedExpressionOrdinal = 18;
+        public const int Expression_NamedLambdaReference = 19;
 
         // ── Expression.Literal (oneof literal_type) ────────────────────
         public const int Literal_Boolean = 1;
@@ -113,36 +237,81 @@ namespace KustoAdbc.Substrait
         public const int Literal_Fp64 = 11;
         public const int Literal_String = 12;
         public const int Literal_Binary = 13;
-        public const int Literal_Timestamp = 14;
         public const int Literal_Date = 16;
-        public const int Literal_Time = 17;
-        public const int Literal_TimestampTz = 27;
-        public const int Literal_Null = 26;
+        public const int Literal_IntervalYearToMonth = 19;
+        public const int Literal_IntervalDayToSecond = 20;
+        public const int Literal_FixedChar = 21;
+        public const int Literal_VarChar = 22;
+        public const int Literal_FixedBinary = 23;
+        public const int Literal_Decimal = 24;
+        public const int Literal_Struct = 25;
+        public const int Literal_Map = 26;
+        public const int Literal_Uuid = 28;
+        public const int Literal_Null = 29;
+        public const int Literal_List = 30;
+        public const int Literal_EmptyList = 31;
+        public const int Literal_EmptyMap = 32;
+        public const int Literal_UserDefined = 33;
+        public const int Literal_PrecisionTimestamp = 34;
+        public const int Literal_PrecisionTimestampTz = 35;
+        public const int Literal_IntervalCompound = 36;
+        public const int Literal_PrecisionTime = 37;
+        public const int Literal_Nullable = 50;
+        public const int Literal_TypeVariationReference = 51;
+
+        public const int VarCharLiteral_Value = 1;
+        public const int DecimalLiteral_Value = 1;
+        public const int DecimalLiteral_Precision = 2;
+        public const int DecimalLiteral_Scale = 3;
+        public const int PrecisionTimestampLiteral_Precision = 1;
+        public const int PrecisionTimestampLiteral_Value = 2;
+        public const int IntervalYearToMonth_Years = 1;
+        public const int IntervalYearToMonth_Months = 2;
+        public const int IntervalDayToSecond_Days = 1;
+        public const int IntervalDayToSecond_Seconds = 2;
+        public const int IntervalDayToSecond_Microseconds = 3;   // legacy
+        public const int IntervalDayToSecond_Precision = 4;
+        public const int IntervalDayToSecond_Subseconds = 5;
 
         // ── FieldReference ─────────────────────────────────────────────
         public const int FieldReference_DirectReference = 1;
         public const int FieldReference_MaskedReference = 2;
-        public const int FieldReference_RootReference = 3;
+        public const int FieldReference_Expression = 3;
+        public const int FieldReference_RootReference = 4;
+        public const int FieldReference_OuterReference = 5;
+        public const int FieldReference_LambdaParameterReference = 6;
 
         // ── ReferenceSegment (oneof reference_type) ────────────────────
         public const int ReferenceSegment_MapKey = 1;
-        public const int ReferenceSegment_ListElement = 2;
-        public const int ReferenceSegment_StructField = 3;
+        public const int ReferenceSegment_StructField = 2;
+        public const int ReferenceSegment_ListElement = 3;
 
         // ── ReferenceSegment.StructField ───────────────────────────────
         public const int StructField_Field = 1;
         public const int StructField_Child = 2;
 
+        // ── Expression.MaskExpression ──────────────────────────────────
+        public const int MaskExpression_Select = 1;
+        public const int MaskExpression_MaintainSingularStruct = 2;
+        public const int StructSelect_StructItems = 1;
+        public const int StructItem_Field = 1;
+        public const int StructItem_Child = 2;
+
         // ── ScalarFunction ─────────────────────────────────────────────
         public const int ScalarFunction_FunctionReference = 1;
+        public const int ScalarFunction_Args = 2;           // legacy
         public const int ScalarFunction_OutputType = 3;
         public const int ScalarFunction_Arguments = 4;
         public const int ScalarFunction_Options = 5;
 
-        // ── FunctionArgument ───────────────────────────────────────────
+        // ── FunctionArgument (oneof arg_type) ──────────────────────────
         public const int FunctionArgument_Enum = 1;
-        public const int FunctionArgument_Value = 2;
-        public const int FunctionArgument_Type = 3;
+        public const int FunctionArgument_Type = 2;
+        public const int FunctionArgument_Value = 3;
+
+        // ── FunctionOption ─────────────────────────────────────────────
+        public const int FunctionOption_Name = 1;
+        public const int FunctionOption_Preference = 2;
 
         // ── IfThen ─────────────────────────────────────────────────────
         public const int IfThen_Ifs = 1;
@@ -152,26 +321,106 @@ namespace KustoAdbc.Substrait
         public const int IfClause_If = 1;
         public const int IfClause_Then = 2;
 
+        // ── SwitchExpression ───────────────────────────────────────────
+        public const int Switch_Ifs = 1;
+        public const int Switch_Else = 2;
+        public const int Switch_Match = 3;
+        public const int SwitchIfValue_If = 1;
+        public const int SwitchIfValue_Then = 2;
+
+        // ── SingularOrList / MultiOrList ───────────────────────────────
+        public const int SingularOrList_Value = 1;
+        public const int SingularOrList_Options = 2;
+        public const int MultiOrList_Value = 1;
+        public const int MultiOrList_Options = 2;
+        public const int MultiOrListRecord_Fields = 1;
+
+        // ── Cast ───────────────────────────────────────────────────────
+        public const int Cast_Type = 1;
+        public const int Cast_Input = 2;
+        public const int Cast_FailureBehavior = 3;
+
+        public const int FailureBehavior_Unspecified = 0;
+        public const int FailureBehavior_ReturnNull = 1;
+        public const int FailureBehavior_ThrowException = 2;
+
+        // ── ExecutionContextVariable (oneof) ───────────────────────────
+        public const int ContextVariable_CurrentTimestamp = 1;
+        public const int ContextVariable_CurrentTimezone = 2;
+        public const int ContextVariable_CurrentDate = 3;
+
+        public const int VariableEvalMode_PerRecord = 2;
+
+        // ── Type (oneof kind) ──────────────────────────────────────────
+        public const int Type_Bool = 1;
+        public const int Type_I8 = 2;
+        public const int Type_I16 = 3;
+        public const int Type_I32 = 5;
+        public const int Type_I64 = 7;
+        public const int Type_Fp32 = 10;
+        public const int Type_Fp64 = 11;
+        public const int Type_String = 12;
+        public const int Type_Binary = 13;
+        public const int Type_Date = 16;
+        public const int Type_IntervalYear = 19;
+        public const int Type_IntervalDay = 20;
+        public const int Type_FixedChar = 21;
+        public const int Type_VarChar = 22;
+        public const int Type_FixedBinary = 23;
+        public const int Type_Decimal = 24;
+        public const int Type_Struct = 25;
+        public const int Type_List = 27;
+        public const int Type_Map = 28;
+        public const int Type_UserDefined = 30;
+        public const int Type_Uuid = 32;
+        public const int Type_PrecisionTimestamp = 33;
+        public const int Type_PrecisionTimestampTz = 34;
+        public const int Type_IntervalCompound = 35;
+        public const int Type_PrecisionTime = 36;
+        public const int Type_Alias = 37;
+        public const int Type_Func = 38;
+        public const int Type_Unbound = 39;
+
+        // Field numbers inside the simple type messages. Types with a
+        // leading length/precision/scale field shift the nullability number.
+        public const int SimpleType_Nullability = 2;
+        public const int IntervalDayType_Precision = 3;
+        public const int ParameterizedType_Length = 1;     // FixedChar, VarChar, FixedBinary
+        public const int ParameterizedType_Nullability = 3;
+        public const int PrecisionType_Precision = 1;      // PrecisionTime(stamp)(TZ)
+        public const int DecimalType_Scale = 1;
+        public const int DecimalType_Precision = 2;
+        public const int DecimalType_Nullability = 4;
+        public const int StructType_Types = 1;
+        public const int StructType_Nullability = 3;
+
+        public const int Nullability_Nullable = 1;
+        public const int Nullability_Required = 2;
+
         // ── NamedStruct ────────────────────────────────────────────────
         public const int NamedStruct_Names = 1;
         public const int NamedStruct_Struct = 2;
 
         // ── NamedTable ─────────────────────────────────────────────────
         public const int NamedTable_Names = 1;
-        public const int NamedTable_AdvancedExtension = 2;
+        public const int NamedTable_AdvancedExtension = 10;
 
-        // ── SimpleExtensionURI ─────────────────────────────────────────
-        public const int ExtensionUri_Anchor = 1;
-        public const int ExtensionUri_Uri = 2;
+        // ── SimpleExtensionURN / legacy SimpleExtensionURI ─────────────
+        public const int ExtensionUrn_Anchor = 1;
+        public const int ExtensionUrn_Urn = 2;
 
         // ── SimpleExtensionDeclaration (oneof mapping_type) ────────────
         public const int ExtensionDecl_ExtensionType = 1;
         public const int ExtensionDecl_ExtensionTypeVariation = 2;
         public const int ExtensionDecl_ExtensionFunction = 3;
 
+        // ── SimpleExtensionDeclaration.ExtensionTypeVariation ──────────
+        public const int ExtensionTypeVariation_Anchor = 2;
+
         // ── SimpleExtensionDeclaration.ExtensionFunction ───────────────
-        public const int ExtensionFunction_UriReference = 1;
+        public const int ExtensionFunction_UriReference = 1;  // legacy
         public const int ExtensionFunction_Anchor = 2;
         public const int ExtensionFunction_Name = 3;
+        public const int ExtensionFunction_UrnReference = 4;
     }
 }

@@ -9,255 +9,223 @@ namespace KustoAdbc.Tests
 {
     public class PartialPushdownTests
     {
-        // Reuse the PB helper from SubstraitToKqlTranslatorTests
-        // (We need to duplicate the essential builders here since they're nested in another class)
-        static class PB
-        {
-            public static byte[] Varint(int value)
-            {
-                var bytes = new System.Collections.Generic.List<byte>();
-                uint v = (uint)value;
-                while (v >= 0x80) { bytes.Add((byte)(v | 0x80)); v >>= 7; }
-                bytes.Add((byte)v);
-                return bytes.ToArray();
-            }
+        static byte[] ReadU() => P.Read("U", ("i", P.TI32), ("l", P.TI64), ("s", P.TString));
+        static byte[] ReadCustomers() => P.Read("customers", ("id", P.TI64), ("cname", P.TString), ("region", P.TString));
 
-            public static byte[] Varint64(long value)
-            {
-                var bytes = new System.Collections.Generic.List<byte>();
-                ulong v = (ulong)value;
-                while (v >= 0x80) { bytes.Add((byte)(v | 0x80)); v >>= 7; }
-                bytes.Add((byte)v);
-                return bytes.ToArray();
-            }
-
-            public static byte[] Tag(int fn, int wt) => Varint((fn << 3) | wt);
-
-            public static byte[] LenDel(int fn, byte[] content)
-            {
-                var r = new System.Collections.Generic.List<byte>();
-                r.AddRange(Tag(fn, 2)); r.AddRange(Varint(content.Length)); r.AddRange(content);
-                return r.ToArray();
-            }
-
-            public static byte[] VarField(int fn, int v)
-            {
-                var r = new System.Collections.Generic.List<byte>();
-                r.AddRange(Tag(fn, 0)); r.AddRange(Varint(v));
-                return r.ToArray();
-            }
-
-            public static byte[] VarField64(int fn, long v)
-            {
-                var r = new System.Collections.Generic.List<byte>();
-                r.AddRange(Tag(fn, 0)); r.AddRange(Varint64(v));
-                return r.ToArray();
-            }
-
-            public static byte[] StrField(int fn, string v)
-                => LenDel(fn, Encoding.UTF8.GetBytes(v));
-
-            public static byte[] Cat(params byte[][] arrays)
-            {
-                int total = 0;
-                foreach (var a in arrays) total += a.Length;
-                var result = new byte[total];
-                int pos = 0;
-                foreach (var a in arrays) { Buffer.BlockCopy(a, 0, result, pos, a.Length); pos += a.Length; }
-                return result;
-            }
-
-            public static byte[] NamedTable(string name) => StrField(1, name);
-
-            public static byte[] ReadRelWithSchema(string table, string[] cols)
-            {
-                var parts = new System.Collections.Generic.List<byte[]>();
-                // base_schema (field 2): NamedStruct with names
-                if (cols.Length > 0)
-                {
-                    var nsContent = new System.Collections.Generic.List<byte>();
-                    foreach (var c in cols) nsContent.AddRange(StrField(1, c));
-                    parts.Add(LenDel(2, nsContent.ToArray()));
-                }
-                parts.Add(LenDel(7, NamedTable(table)));
-                return Cat(parts.ToArray());
-            }
-
-            public static byte[] ReadRel(string table) => LenDel(7, NamedTable(table));
-            public static byte[] Rel(int field, byte[] content) => LenDel(field, content);
-
-            public static byte[] PlanRel(byte[] rel)
-                => LenDel(2, LenDel(1, rel));
-
-            public static byte[] Plan(byte[] planRel)
-                => LenDel(3, planRel);
-
-            public static byte[] LitBool(bool v) => LenDel(1, VarField(1, v ? 1 : 0));
-            public static byte[] LitI32(int v) => LenDel(1, VarField(5, v));
-
-            public static byte[] FieldRef(int index)
-            {
-                var sf = VarField(1, index);
-                var rs = LenDel(3, sf);
-                var fr = LenDel(1, rs);
-                return LenDel(2, fr);
-            }
-
-            public static byte[] FilterRel(byte[] input, byte[] condition)
-                => Cat(LenDel(2, input), LenDel(3, condition));
-
-            public static byte[] FetchRel(byte[] input, long offset, long count)
-                => Cat(LenDel(2, input), VarField64(3, offset), VarField64(4, count));
-
-            public static byte[] ExtFunc(int urnRef, int anchor, string name)
-                => LenDel(3, Cat(VarField(4, urnRef), VarField(2, anchor), StrField(3, name)));
-
-            public static byte[] ExtUri(int anchor, string uri)
-                => Cat(VarField(1, anchor), StrField(2, uri));
-
-            public static byte[] PlanWithExtensions(byte[][] extUris, byte[][] extDecls, byte[] planRel)
-            {
-                var parts = new System.Collections.Generic.List<byte[]>();
-                foreach (var uri in extUris) parts.Add(LenDel(8, uri));
-                foreach (var decl in extDecls) parts.Add(LenDel(2, decl));
-                parts.Add(LenDel(3, planRel));
-                return Cat(parts.ToArray());
-            }
-
-            public static byte[] ScalarFunc(int funcRef, params byte[][] args)
-            {
-                var parts = new System.Collections.Generic.List<byte[]> { VarField(1, funcRef) };
-                foreach (var arg in args)
-                    parts.Add(LenDel(4, LenDel(2, arg)));
-                return LenDel(3, Cat(parts.ToArray()));
-            }
-
-            public static byte[] JoinRel(byte[] left, byte[] right, byte[]? cond, int joinType)
-            {
-                var parts = new System.Collections.Generic.List<byte[]>
-                    { LenDel(2, left), LenDel(3, right) };
-                if (cond != null) parts.Add(LenDel(4, cond));
-                parts.Add(VarField(5, joinType));
-                return Cat(parts.ToArray());
-            }
-        }
+        /// <summary>A function the driver doesn't support, so the relation using it stays in the plan.</summary>
+        static int Unsupported(Functions f, string name = "levenshtein:str_str") => f.Add("functions_string", name);
 
         [Fact]
         public void FullyTranslatable_ReturnsFullyPushed()
         {
-            // Simple: T | take 10 — fully translatable
-            var read = PB.Rel(1, PB.ReadRel("MyTable"));
-            var fetch = PB.FetchRel(read, 0, 10);
-            var plan = PB.Plan(PB.PlanRel(PB.Rel(3, fetch)));
+            var plan = P.Plan(P.Fetch(ReadU(), null, 10), new[] { "i", "l", "s" });
 
             var result = SubstraitPartialPushdown.Pushdown(plan);
 
             Assert.True(result.FullyPushed);
-            Assert.NotNull(result.Kql);
-            Assert.Contains("MyTable", result.Kql!.ToString());
-            Assert.Contains("take 10", result.Kql!.ToString());
-            Assert.True(result.Plan.Length > 0);
+            KqlAssert.Equal("U | project i, l, s = tostring(s) | take 10", result.Kql!.ToString());
+
+            var output = PlanShape.Parse(result.Plan.ToArray());
+            Assert.Contains(SubstraitPartialPushdown.KqlExtensionUrn, output.Urns);
+            Assert.Equal(new[] { "i", "l", "s" }, output.RootNames);
+            var node = Assert.Single(output.KqlNodes);
+            KqlAssert.Equal("U | project i, l, s = tostring(s) | take 10", node.Kql);
+            Assert.Equal(new[] { "i", "l", "s" }, node.ColumnNames);
+            Assert.Equal(new[] { 5, 7, 12 }, node.ColumnTypeFields); // i32, i64, string
+            Assert.Equal("read", output.RootRelKinds);
         }
 
         [Fact]
-        public void FullyTranslatable_OutputContainsKqlQueryNode()
+        public void UnsupportedFilter_ReadIsPushedDownAndFilterKept()
         {
-            var read = PB.Rel(1, PB.ReadRel("Events"));
-            var plan = PB.Plan(PB.PlanRel(read));
-
-            var result = SubstraitPartialPushdown.Pushdown(plan);
-
-            Assert.True(result.FullyPushed);
-
-            // The output plan should contain our KQL extension marker
-            string planStr = Encoding.UTF8.GetString(result.Plan.ToArray());
-            Assert.Contains(SubstraitPartialPushdown.KqlFunctionName, planStr);
-            Assert.Contains("Events", planStr);
-        }
-
-        [Fact]
-        public void UnsupportedFilter_PartialPushdown()
-        {
-            // Filter uses unsupported function, but ReadRel is translatable
-            // Plan: Filter(unsupported_func) → Read("T")
-            var unsupportedExpr = PB.ScalarFunc(42, PB.FieldRef(0));
-            var read = PB.Rel(1, PB.ReadRel("T"));
-            var filter = PB.FilterRel(read, unsupportedExpr);
-            var rel = PB.Rel(2, filter);
-
-            var plan = PB.PlanWithExtensions(
-                new[] { PB.ExtUri(1, "extension:io.substrait:custom") },
-                new[] { PB.ExtFunc(1, 42, "unsupported_exotic_func:i32") },
-                PB.PlanRel(rel));
+            var f = new Functions();
+            int levenshtein = Unsupported(f);
+            var plan = P.Plan(P.Filter(ReadU(), P.Call(levenshtein, P.Field(2), P.Str("x"))), new[] { "i", "l", "s" }, f);
 
             var result = SubstraitPartialPushdown.Pushdown(plan);
 
             Assert.False(result.FullyPushed);
             Assert.Null(result.Kql);
-            Assert.True(result.Plan.Length > 0);
-
-            // The output should contain the KQL query marker (for the pushed-down ReadRel)
-            string planStr = Encoding.UTF8.GetString(result.Plan.ToArray());
-            Assert.Contains(SubstraitPartialPushdown.KqlFunctionName, planStr);
-            Assert.Contains("T", planStr); // The table name should appear in the KQL
+            var output = PlanShape.Parse(result.Plan.ToArray());
+            Assert.Equal("filter(read)", output.RootRelKinds);
+            Assert.Contains("levenshtein:str_str", output.FunctionNames);
+            Assert.Contains(SubstraitPartialPushdown.KqlExtensionUrn, output.Urns);
+            var node = Assert.Single(output.KqlNodes);
+            KqlAssert.Equal("U | project i, l, s = tostring(s)", node.Kql);
+            Assert.Equal(new[] { "i", "l", "s" }, node.ColumnNames);
         }
 
         [Fact]
-        public void FullyTranslatableWithFilter_ReturnsFullyPushed()
+        public void TranslatableSubtreeBelowUnsupportedRelation_IsPushedAsAWhole()
         {
-            // Filter with supported condition: T | where true
-            var read = PB.Rel(1, PB.ReadRel("T"));
-            var filter = PB.FilterRel(read, PB.LitBool(true));
-            var plan = PB.Plan(PB.PlanRel(PB.Rel(2, filter)));
+            var f = new Functions();
+            int levenshtein = Unsupported(f);
+            int gt = f.Add("functions_comparison", "gt:any_any");
+            var filtered = P.Filter(ReadU(), P.Call(gt, P.Field(1), P.I64(5)));
+            var plan = P.Plan(P.ProjectEmit(filtered, new[] { 3 }, P.Call(levenshtein, P.Field(2), P.Str("x"))), new[] { "d" }, f);
 
-            var result = SubstraitPartialPushdown.Pushdown(plan);
+            var output = PlanShape.Parse(SubstraitPartialPushdown.Pushdown(plan).Plan.ToArray());
 
-            Assert.True(result.FullyPushed);
-            Assert.Contains("where", result.Kql!.ToString());
+            Assert.Equal("project(read)", output.RootRelKinds);
+            var node = Assert.Single(output.KqlNodes);
+            KqlAssert.Equal("U | project i, l, s = tostring(s) | where (l > 5)", node.Kql);
         }
 
         [Fact]
         public void JoinWithUnsupportedFilters_BothSidesPushedDown()
         {
-            // Join where both sides have unsupported filters:
-            //   Join(inner)
-            //     Filter(unsupported) → Read("A")
-            //     Filter(unsupported) → Read("B")
-            // Expected: Join preserved, both Reads pushed to KQL
+            var f = new Functions();
+            int levenshtein = Unsupported(f);
+            var left = P.Filter(ReadU(), P.Call(levenshtein, P.Field(2), P.Str("a")));
+            var right = P.Filter(ReadCustomers(), P.Call(levenshtein, P.Field(1), P.Str("b")));
+            var plan = P.Plan(P.Join(left, right, null, P.Inner), null, f);
 
-            var unsupportedLeft = PB.ScalarFunc(10, PB.FieldRef(0));
-            var unsupportedRight = PB.ScalarFunc(11, PB.FieldRef(0));
+            var output = PlanShape.Parse(SubstraitPartialPushdown.Pushdown(plan).Plan.ToArray());
 
-            var leftRead = PB.Rel(1, PB.ReadRel("A"));
-            var leftFilter = PB.Rel(2, PB.FilterRel(leftRead, unsupportedLeft));
+            Assert.Equal("join(filter(read),filter(read))", output.RootRelKinds);
+            Assert.Equal(new[] { "U | project i, l, s = tostring(s)", "customers | project id, cname = tostring(cname), region = tostring(region)" }, output.KqlNodes.Select(n => KqlAssert.Canonical(n.Kql)));
+            Assert.Equal(new[] { "id", "cname", "region" }, output.KqlNodes[1].ColumnNames);
+        }
 
-            var rightRead = PB.Rel(1, PB.ReadRel("B"));
-            var rightFilter = PB.Rel(2, PB.FilterRel(rightRead, unsupportedRight));
+        [Fact]
+        public void SubtreeWithComputedColumns_DeclaresTheirTypes()
+        {
+            var f = new Functions();
+            int levenshtein = Unsupported(f);
+            int add = f.Add("functions_arithmetic", "add:i64_i64");
+            var projected = P.ProjectEmit(ReadU(), new[] { 2, 3 }, P.Call(add, P.Field(1), P.I64(1)));
+            var plan = P.Plan(P.Filter(projected, P.Call(levenshtein, P.Field(0), P.Str("x"))), null, f);
 
-            var join = PB.JoinRel(leftFilter, rightFilter, null, 1);
+            var node = Assert.Single(PlanShape.Parse(SubstraitPartialPushdown.Pushdown(plan).Plan.ToArray()).KqlNodes);
 
-            var plan = PB.PlanWithExtensions(
-                new[] { PB.ExtUri(1, "extension:io.substrait:custom") },
-                new[] {
-                    PB.ExtFunc(1, 10, "left_exotic:i32"),
-                    PB.ExtFunc(1, 11, "right_exotic:i32"),
-                },
-                PB.PlanRel(PB.Rel(6, join)));
-
-            var result = SubstraitPartialPushdown.Pushdown(plan);
-
-            Assert.False(result.FullyPushed);
-
-            // Output should contain KQL markers for the pushed-down Read nodes
-            string planStr = Encoding.UTF8.GetString(result.Plan.ToArray());
-            Assert.Contains(SubstraitPartialPushdown.KqlFunctionName, planStr);
+            KqlAssert.Equal("U | project i, l, s = tostring(s) | extend _e0 = (l + 1) | project s, _e0", node.Kql);
+            Assert.Equal(new[] { 12, 7 }, node.ColumnTypeFields);
         }
 
         [Fact]
         public void EmptyPlan_Throws()
         {
-            Assert.Throws<ArgumentException>(() =>
-                SubstraitPartialPushdown.Pushdown(Array.Empty<byte>()));
+            Assert.Throws<ArgumentException>(() => SubstraitPartialPushdown.Pushdown(Array.Empty<byte>()));
+        }
+
+        /// <summary>The parts of an output plan the tests check, read with field numbers from the .proto files.</summary>
+        sealed class PlanShape
+        {
+            public List<string> Urns { get; } = new();
+            public List<string> FunctionNames { get; } = new();
+            public List<string> RootNames { get; } = new();
+            public string RootRelKinds { get; private set; } = "";
+            public List<(string Kql, List<string> ColumnNames, List<int> ColumnTypeFields)> KqlNodes { get; } = new();
+
+            byte[] _data = Array.Empty<byte>();
+
+            public static PlanShape Parse(byte[] plan)
+            {
+                var shape = new PlanShape { _data = plan };
+                var r = new ProtoReader(plan, 0, plan.Length);
+                while (r.Next(out int field, out int wire))
+                {
+                    switch (field)
+                    {
+                        case 8: // extension_urns
+                        {
+                            var u = r.ReadMessage(wire);
+                            while (u.Next(out int uf, out int uw)) { if (uf == 2) shape.Urns.Add(u.ReadString(uw)); else u.Skip(uw); }
+                            break;
+                        }
+                        case 2: // extensions
+                        {
+                            var d = r.ReadMessage(wire);
+                            while (d.Next(out int df, out int dw))
+                            {
+                                if (df != 3) { d.Skip(dw); continue; }
+                                var fn = d.ReadMessage(dw);
+                                while (fn.Next(out int ff, out int fw)) { if (ff == 3) shape.FunctionNames.Add(fn.ReadString(fw)); else fn.Skip(fw); }
+                            }
+                            break;
+                        }
+                        case 3: // relations
+                        {
+                            var pr = r.ReadMessage(wire);
+                            while (pr.Next(out int pf, out int pw))
+                            {
+                                if (pf != 2) { pr.Skip(pw); continue; }
+                                var root = pr.ReadMessage(pw);
+                                while (root.Next(out int rf, out int rw))
+                                {
+                                    if (rf == 1) shape.RootRelKinds = shape.Rel(root.ReadMessage(rw));
+                                    else if (rf == 2) shape.RootNames.Add(root.ReadString(rw));
+                                    else root.Skip(rw);
+                                }
+                            }
+                            break;
+                        }
+                        default:
+                            r.Skip(wire);
+                            break;
+                    }
+                }
+                return shape;
+            }
+
+            string Rel(ProtoReader rel)
+            {
+                rel.Next(out int kind, out int wire);
+                var content = rel.ReadMessage(wire);
+                string name = kind switch { 1 => "read", 2 => "filter", 3 => "fetch", 4 => "aggregate", 5 => "sort", 6 => "join", 7 => "project", _ => kind.ToString() };
+                if (kind == 1)
+                {
+                    ReadNode(content);
+                    return name;
+                }
+                int[] children = kind == 6 ? new[] { 2, 3 } : new[] { 2 };
+                var parts = new List<string>();
+                while (content.Next(out int f, out int w))
+                {
+                    if (Array.IndexOf(children, f) >= 0) parts.Add(Rel(content.ReadMessage(w)));
+                    else content.Skip(w);
+                }
+                return $"{name}({string.Join(",", parts)})";
+            }
+
+            void ReadNode(ProtoReader read)
+            {
+                var names = new List<string>();
+                var columns = new List<string>();
+                var types = new List<int>();
+                while (read.Next(out int f, out int w))
+                {
+                    if (f == 7)
+                    {
+                        var t = read.ReadMessage(w);
+                        while (t.Next(out int tf, out int tw)) { if (tf == 1) names.Add(t.ReadString(tw)); else t.Skip(tw); }
+                    }
+                    else if (f == 2)
+                    {
+                        var ns = read.ReadMessage(w);
+                        while (ns.Next(out int nf, out int nw))
+                        {
+                            if (nf == 1) columns.Add(ns.ReadString(nw));
+                            else if (nf == 2)
+                            {
+                                var st = ns.ReadMessage(nw);
+                                while (st.Next(out int sf, out int sw))
+                                {
+                                    if (sf != 1) { st.Skip(sw); continue; }
+                                    var type = st.ReadMessage(sw);
+                                    type.Next(out int typeField, out int typeWire);
+                                    type.Skip(typeWire);
+                                    types.Add(typeField);
+                                }
+                            }
+                            else ns.Skip(nw);
+                        }
+                    }
+                    else read.Skip(w);
+                }
+                if (names.Count == 2 && names[0] == SubstraitPartialPushdown.KqlFunctionName)
+                    KqlNodes.Add((names[1], columns, types));
+            }
         }
     }
 }

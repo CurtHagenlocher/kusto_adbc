@@ -1,0 +1,4 @@
+['orders']
+| project ['qty']
+| summarize _a0 = count() by _g1 = (tolong(['qty']) - 2 * (tolong(['qty']) / 2))
+| project ['parity'] = _g1, ['n'] = _a0

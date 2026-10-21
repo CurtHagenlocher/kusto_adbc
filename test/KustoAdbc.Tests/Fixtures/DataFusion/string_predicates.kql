@@ -1,0 +1,1 @@
+ERROR: Unsupported Substrait function 'like:str_str_str' has no KQL equivalent. Use KustoCapabilities.GetDialectYaml() to discover supported functions.

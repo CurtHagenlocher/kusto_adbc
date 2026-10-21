@@ -1,0 +1,12 @@
+['orders']
+| project ['id'], ['customer_id']
+| join kind=inner (['customers']
+| project ['id'], ['cname'] = tostring(['cname'])
+| project ['id_0'] = ['id'], ['cname']
+| where isnotnull(['id_0'])) on $left.['customer_id'] == $right.['id_0']
+| project ['id'], ['id_0'], ['cname']
+| join kind=inner (['customers']
+| project ['id'], ['region'] = tostring(['region'])
+| project ['id_1'] = ['id'], ['region']
+| where isnotnull(['id_1'])) on $left.['id_0'] == $right.['id_1']
+| project ['id'], ['cname'], ['region']

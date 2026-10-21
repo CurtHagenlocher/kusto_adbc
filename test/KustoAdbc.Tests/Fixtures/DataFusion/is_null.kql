@@ -1,0 +1,4 @@
+['orders']
+| project ['id'], ['name'] = tostring(['name']), ['price'] = toreal(['price'])
+| where (isempty(['name']) or isnotnull(['price']))
+| project ['id']

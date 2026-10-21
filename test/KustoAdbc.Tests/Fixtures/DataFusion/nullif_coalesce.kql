@@ -1,0 +1,4 @@
+['orders']
+| project ['name'] = tostring(['name'])
+| extend _e0 = iif((['name'] == 'a'), '', ['name']), _e1 = case(isnotempty(['name']), ['name'], 'none')
+| project ['n'] = _e0, ['c'] = _e1

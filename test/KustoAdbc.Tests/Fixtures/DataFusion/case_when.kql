@@ -1,0 +1,4 @@
+['orders']
+| project ['qty']
+| extend _e0 = case((['qty'] > int(1)), 'many', (['qty'] == int(1)), 'one', 'none')
+| project ['c'] = _e0

@@ -220,15 +220,13 @@ namespace KustoAdbc.Tests
         }
 
         [Fact]
-        public void Capabilities_YamlIsAccessible()
+        public void Capabilities_DialectYamlIsAccessible()
         {
-            string yaml = KustoCapabilities.GetCapabilityYaml();
+            string yaml = KustoCapabilities.GetDialectYaml();
             Assert.NotEmpty(yaml);
-            Assert.Contains("scalar_functions:", yaml);
-            Assert.Contains("aggregate_functions:", yaml);
-            Assert.Contains("name: \"add\"", yaml);
-            Assert.Contains("name: \"count\"", yaml);
-            Assert.Contains("name: \"char_length\"", yaml);
+            Assert.Contains("supported_scalar_functions:", yaml);
+            Assert.Contains("supported_aggregate_functions:", yaml);
+            Assert.Contains("supported_relations:", yaml);
         }
     }
 }

@@ -33,12 +33,21 @@ namespace KustoAdbc.Substrait
         /// <summary>Plan declares a function that has no KQL equivalent.</summary>
         internal static SubstraitTranslationException UnsupportedFunction(string functionSignature)
             => new($"Unsupported Substrait function '{functionSignature}' has no KQL equivalent. " +
-                   $"Use KustoCapabilities.GetCapabilityYaml() to discover supported functions.");
+                   $"Use KustoCapabilities.GetDialectYaml() to discover supported functions.");
 
         /// <summary>Plan uses a relation type we don't support.</summary>
         internal static SubstraitTranslationException UnsupportedRelation(int relFieldNumber)
-            => new($"Unsupported Substrait relation type (field={relFieldNumber}). " +
-                   $"Supported: read(1), filter(2), fetch(3), aggregate(4), sort(5), join(6), project(7).");
+            => new($"Unsupported Substrait relation type (Rel field {relFieldNumber}). " +
+                   $"Supported: read, filter, fetch, aggregate, sort, join, project, set, cross, top_n.");
+
+        /// <summary>Plan uses a construct that has no faithful KQL translation.</summary>
+        internal static SubstraitTranslationException Unsupported(string detail)
+            => new($"Unsupported Substrait construct: {detail}");
+
+        /// <summary>A function option was requested, but with no value the driver can deliver.</summary>
+        internal static SubstraitTranslationException UnsupportedOption(string function, string option, IEnumerable<string> requested)
+            => new($"Function '{function}' option '{option}' requests [{string.Join(", ", requested)}], " +
+                   $"none of which the Kusto driver can deliver.");
 
         /// <summary>Expression type not supported.</summary>
         internal static SubstraitTranslationException UnsupportedExpression(string detail)
@@ -51,7 +60,6 @@ namespace KustoAdbc.Substrait
 
         /// <summary>Unsupported literal type.</summary>
         internal static SubstraitTranslationException UnsupportedLiteral(int fieldNumber)
-            => new($"Unsupported Substrait literal type (field={fieldNumber}). " +
-                   $"Supported: boolean(1), i8(2), i16(3), i32(5), i64(7), fp32(10), fp64(11), string(12), null(26).");
+            => new($"Unsupported Substrait literal type (Literal field {fieldNumber}).");
     }
 }

@@ -1,0 +1,4 @@
+['orders']
+| project ['id'], ['name'] = tostring(['name']), ['price'] = toreal(['price'])
+| summarize _a0 = count(), _a1 = countif(isnotempty(['name'])), _a2 = count_distinctif(['name'], isnotempty(['name'])), _a3 = iif(countif(isnotnull(['price'])) < 1, real(null), avg(['price'])), _a4 = iif(countif(isnotnull(['price'])) < 1, real(null), min(['price'])), _a5 = iif(countif(isnotnull(['id'])) < 1, long(null), max(['id']))
+| project ['n'] = _a0, ['nn'] = _a1, ['nd'] = _a2, ['a'] = _a3, ['lo'] = _a4, ['hi'] = _a5

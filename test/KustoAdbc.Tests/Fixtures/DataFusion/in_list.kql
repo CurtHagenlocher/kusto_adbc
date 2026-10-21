@@ -1,0 +1,4 @@
+['orders']
+| project ['id'], ['name'] = tostring(['name'])
+| where (((['name'] == 'a') or (['name'] == 'b')) or (((['id'] == 1) or (['id'] == 2)) or (['id'] == 3)))
+| project ['id']

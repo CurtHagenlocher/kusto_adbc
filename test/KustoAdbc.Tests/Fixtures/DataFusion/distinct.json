@@ -1,0 +1,106 @@
+{
+ "relations": [
+  {
+   "root": {
+    "input": {
+     "aggregate": {
+      "input": {
+       "read": {
+        "baseSchema": {
+         "names": [
+          "id",
+          "customer_id",
+          "name",
+          "price",
+          "qty",
+          "ts",
+          "flag"
+         ],
+         "struct": {
+          "types": [
+           {
+            "i64": {
+             "nullability": "NULLABILITY_NULLABLE"
+            }
+           },
+           {
+            "i64": {
+             "nullability": "NULLABILITY_NULLABLE"
+            }
+           },
+           {
+            "string": {
+             "nullability": "NULLABILITY_NULLABLE"
+            }
+           },
+           {
+            "fp64": {
+             "nullability": "NULLABILITY_NULLABLE"
+            }
+           },
+           {
+            "i32": {
+             "nullability": "NULLABILITY_NULLABLE"
+            }
+           },
+           {
+            "precisionTimestampTz": {
+             "precision": 6,
+             "nullability": "NULLABILITY_NULLABLE"
+            }
+           },
+           {
+            "bool": {
+             "nullability": "NULLABILITY_NULLABLE"
+            }
+           }
+          ],
+          "nullability": "NULLABILITY_REQUIRED"
+         }
+        },
+        "projection": {
+         "select": {
+          "structItems": [
+           {
+            "field": 2
+           }
+          ]
+         }
+        },
+        "namedTable": {
+         "names": [
+          "orders"
+         ]
+        }
+       }
+      },
+      "groupings": [
+       {
+        "expressionReferences": [
+         0
+        ]
+       }
+      ],
+      "groupingExpressions": [
+       {
+        "selection": {
+         "directReference": {
+          "structField": {}
+         },
+         "rootReference": {}
+        }
+       }
+      ]
+     }
+    },
+    "names": [
+     "name"
+    ]
+   }
+  }
+ ],
+ "version": {
+  "minorNumber": 85,
+  "producer": "datafusion"
+ }
+}

@@ -1,0 +1,4 @@
+['orders']
+| project ['id'], ['price'] = toreal(['price']), ['flag']
+| where (not(['flag']) and iif(isnull(['price']), bool(null), (['price'] != real(3.0))))
+| project ['id']

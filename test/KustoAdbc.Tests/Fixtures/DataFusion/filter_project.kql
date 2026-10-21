@@ -1,0 +1,5 @@
+['orders']
+| project ['name'] = tostring(['name']), ['price'] = toreal(['price']), ['qty']
+| where (['qty'] > int(5))
+| extend _e0 = (['price'] * real(2.0))
+| project ['name'], ['double_price'] = _e0

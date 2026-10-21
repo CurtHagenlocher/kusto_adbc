@@ -1,0 +1,5 @@
+['orders']
+| project ['customer_id'], ['price'] = toreal(['price'])
+| summarize _a0 = iif(countif(isnotnull(['price'])) < 1, real(null), sum(['price'])) by ['customer_id']
+| where (_a0 > real(100.0))
+| project ['customer_id'], ['total'] = _a0

@@ -5,11 +5,10 @@ A C# [ADBC](https://arrow.apache.org/adbc/) (Arrow Database Connectivity) driver
 ## Features
 
 - **KQL query execution** via the standard ADBC `SqlQuery` interface
-- **Substrait → KQL translation** — translates Substrait query plans into native KQL, supporting Read, Filter, Project, Aggregate, Sort, Fetch, and Join relations
+- **Substrait → KQL translation** — translates Substrait plans (v0.107 protos; older producers' legacy fields are accepted) into native KQL, supporting Read, Filter, Project, Aggregate, Sort, Fetch, TopN, Join, Cross and Set (union) relations. Constructs that can't be translated with the same semantics are rejected rather than approximated
 - **Partial pushdown** — when a Substrait plan contains unsupported operations, the driver translates the supported subtrees to KQL and returns a residual plan for client-side evaluation
-- **Capability declaration** — publishes a YAML capability document describing supported relations, functions, types, and expressions
-- **64 function mappings** — maps Substrait extension functions to their KQL equivalents
-- **UTF-8 zero-allocation KQL generation** — generates KQL directly in UTF-8 bytes with no intermediate string allocations
+- **Substrait dialect** — publishes a [Substrait dialect](src/KustoAdbc/Substrait/Dialect/kusto_dialect.yaml) describing exactly the types, relations, expressions, functions and option behaviors the translator supports (`KustoCapabilities.GetDialectYaml()`)
+- **UTF-8 KQL generation** — generates KQL directly as UTF-8 bytes, ready to send
 - **Streaming JSON→Arrow parser** — parses Kusto JSON responses into Arrow record batches using `PipeReader` and `Utf8JsonReader`
 - **ADBC metadata** — full `GetObjects` (with ADBC-compliant nested schema) and `GetTableSchema` support
 
@@ -57,22 +56,31 @@ src/KustoAdbc/
 ├── Http/
 │   └── KustoHttpClient.cs      # HTTP client for Kusto REST API
 └── Substrait/
-    ├── SubstraitToKqlTranslator.cs   # Substrait plan → KQL translation
+    ├── SubstraitToKqlTranslator.cs   # Public entry point: Substrait plan → KQL
+    ├── SubstraitPlanDecoder.cs       # Protobuf → plan model (rejects what it can't represent)
+    ├── SubstraitModel.cs             # Plan model: relations, expressions, types
+    ├── KqlEmitter.cs                 # Plan model → KQL, tracking each relation's output columns
+    ├── KqlFunctionCatalog.cs         # Supported functions, signatures, options and their KQL
     ├── SubstraitPartialPushdown.cs   # Partial pushdown engine
-    ├── KqlFunctionMap.cs             # Substrait ↔ KQL function mappings
-    ├── KustoCapabilities.cs          # Capability YAML publication
-    ├── Utf8KqlWriter.cs              # UTF-8 KQL string builder
+    ├── KustoCapabilities.cs          # Dialect publication
+    ├── ProtoReader.cs                # Bounds-checked protobuf reading
     ├── ProtobufWriter.cs             # Low-level protobuf writing
+    ├── SubstraitFields.cs            # Substrait protobuf field numbers
+    ├── Utf8KqlWriter.cs              # UTF-8 KQL builder (identifiers, literals)
     ├── SubstraitTranslationException.cs
-    └── Extensions/
-        └── kusto_functions.yaml      # Substrait function extension catalog
+    └── Dialect/
+        └── kusto_dialect.yaml        # Substrait dialect for this driver
 
-test/KustoAdbc.Tests/               # 69 unit tests
+test/KustoAdbc.Tests/
+├── Fixtures/DataFusion/            # Plans produced by DataFusion from SQL, with reviewed KQL snapshots
+└── Fixtures/Substrait/             # Substrait dialect schema (for validating the dialect)
+scripts/gen_datafusion_fixtures.py  # Regenerates the DataFusion plan fixtures
+scripts/differential_test.py        # Compares DataFusion results with the translated KQL run on a Kusto cluster
 ```
 
-## Design Document
+## Design Documents
 
-See [substrait-adbc-design.md](substrait-adbc-design.md) for the full design proposal describing capability negotiation, plan translation, partial pushdown, and proposed extensions to both ADBC and Substrait. See [implementation-status.md](implementation-status.md) for a summary of what has been implemented.
+See [substrait-adbc-design.md](substrait-adbc-design.md) for the full design proposal describing capability negotiation, plan translation, partial pushdown, and proposed extensions to both ADBC and Substrait. See [implementation-status.md](implementation-status.md) for a summary of what has been implemented, and [substrait-dialect-gaps.md](substrait-dialect-gaps.md) for what the Substrait dialect format can't yet express about this driver.
 
 ## License
 

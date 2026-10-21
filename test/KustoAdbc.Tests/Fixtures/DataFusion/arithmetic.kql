@@ -1,0 +1,4 @@
+['orders']
+| project ['id'], ['price'] = toreal(['price']), ['qty']
+| extend _e0 = (['id'] + 1), _e1 = (['price'] * real(2.5)), _e2 = (tolong(['qty']) / 2), _e3 = (['id'] - 3 * (['id'] / 3)), _e4 = -(['price'])
+| project ['a'] = _e0, ['b'] = _e1, ['c'] = _e2, ['d'] = _e3, ['e'] = _e4

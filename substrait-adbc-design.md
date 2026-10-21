@@ -197,7 +197,7 @@ relations:
 
 #### Function capabilities
 
-Already partially addressed by Substrait's extension YAML files — a consumer publishes which functions it supports. Our Kusto driver already does this via `kusto_functions.yaml`.
+Now addressed by the Substrait dialect format (`text/dialect_schema.yaml`), which lists supported functions by extension, signature and option behavior. Our Kusto driver publishes `kusto_dialect.yaml`; see [substrait-dialect-gaps.md](substrait-dialect-gaps.md) for what the format can't yet express.
 
 #### Type capabilities
 
@@ -464,6 +464,10 @@ These optimizations are engine-specific and cannot be standardized in Substrait.
 
 ## 8. Substrait Gaps and Proposed Extensions
 
+> **Update:** Substrait has since added a dialect format that addresses Gaps 1, 2, 3 and 6 in large
+> part (and declares write relations, Gap 7). The remaining gaps, as found by writing a complete
+> dialect for this driver, are described in [substrait-dialect-gaps.md](substrait-dialect-gaps.md).
+
 ### Gap 1: No capability declaration mechanism
 
 **Current state**: Substrait has no `Capabilities` message or negotiation protocol. Consumers are assumed to support everything.
@@ -576,15 +580,15 @@ We have built a working proof-of-concept that demonstrates the core mechanics:
 |---------|--------|
 | KQL query execution via `SqlQuery` | ✅ |
 | Substrait plan translation to KQL | ✅ |
-| Extension function resolution (50+ functions) | ✅ |
+| Extension function resolution (by URN, signature and options) | ✅ |
 | Schema-aware field reference resolution | ✅ |
-| UTF-8 native KQL generation (zero intermediate strings) | ✅ |
+| UTF-8 native KQL generation | ✅ |
 | Partial pushdown (`SubstraitPartialPushdown.Pushdown()`) | ✅ |
-| Capability YAML publication (`KustoCapabilities`) | ✅ |
+| Substrait dialect publication (`KustoCapabilities.GetDialectYaml()`) | ✅ |
 | Full `GetObjects` with ADBC-compliant nested schema | ✅ |
 | `GetTableSchema` via Kusto management commands | ✅ |
 | Streaming JSON→Arrow response parser | ✅ |
-| 85 unit tests | ✅ |
+| Tests against plans from a real producer (DataFusion), with semantic KQL validation | ✅ |
 
 ### What this demonstrates
 

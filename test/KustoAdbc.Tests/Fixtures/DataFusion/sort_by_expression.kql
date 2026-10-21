@@ -1,0 +1,5 @@
+['orders']
+| project ['id'], ['price'] = toreal(['price']), ['qty']
+| extend _s0 = (['price'] * toreal(['qty']))
+| sort by _s0 desc nulls first
+| project ['id']

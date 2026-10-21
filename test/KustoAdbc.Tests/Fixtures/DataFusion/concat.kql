@@ -1,0 +1,4 @@
+['orders']
+| project ['name'] = tostring(['name'])
+| extend _e0 = strcat(['name'], 'x')
+| project ['c'] = _e0

@@ -1,0 +1,7 @@
+['orders']
+| project ['id'], ['customer_id']
+| join kind=leftsemi (['customers']
+| project ['id']
+| project ['id_0'] = ['id']
+| where isnotnull(['id_0'])) on $left.['customer_id'] == $right.['id_0']
+| project ['id']

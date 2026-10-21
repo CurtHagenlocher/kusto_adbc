@@ -1,8 +1,7 @@
 // Copyright (c) Microsoft Corporation.  All rights reserved.
 // Licensed under the MIT License. See LICENSE in the project root for license information.
 
-using System.Runtime.CompilerServices;
-using System.Text;
+using F = KustoAdbc.Substrait.SubstraitFields;
 
 namespace KustoAdbc.Substrait
 {
@@ -32,19 +31,20 @@ namespace KustoAdbc.Substrait
     }
 
     /// <summary>
-    /// Walks a Substrait plan bottom-up and replaces maximal translatable subtrees
-    /// with custom extension ReadRel nodes containing the equivalent KQL query.
+    /// Walks a Substrait plan top-down and replaces maximal translatable subtrees
+    /// with ReadRel nodes containing the equivalent KQL query.
     ///
     /// The output is always a valid Substrait plan. Unsupported nodes are preserved
-    /// verbatim. The custom extension uses the URI "extension:kusto:kql_query".
-    /// KQL query nodes are encoded as ReadRel with NamedTable names
-    /// ["kql_query", "&lt;actual KQL string&gt;"].
+    /// verbatim. KQL query nodes are encoded as a ReadRel whose NamedTable names are
+    /// ["kql_query", "&lt;KQL&gt;"] and whose base_schema describes the query's
+    /// output columns, in the same order as the subtree they replace, so references
+    /// from the rest of the plan stay valid. The plan declares the extension URN
+    /// "extension:kusto:kql_query" to mark that it uses this convention.
     /// </summary>
     public static class SubstraitPartialPushdown
     {
-        public const string KqlExtensionUri = "extension:kusto:kql_query";
+        public const string KqlExtensionUrn = "extension:kusto:kql_query";
         public const string KqlFunctionName = "kql_query";
-        internal const int KqlUriAnchor = 9999;
 
         /// <summary>
         /// Performs partial pushdown on a Substrait plan.
@@ -54,113 +54,87 @@ namespace KustoAdbc.Substrait
             if (planBytes == null || planBytes.Length == 0)
                 throw new ArgumentException("Substrait plan is empty.", nameof(planBytes));
 
-            var reader = new PushdownEngine(planBytes);
-            return reader.Execute();
+            return new PushdownEngine(planBytes).Execute();
         }
     }
 
     sealed class PushdownEngine
     {
         readonly byte[] _data;
-        readonly Dictionary<int, string> _functionAnchors = new();
-        readonly List<(int start, int end)> _extensionPositions = new();
-        readonly List<(int start, int end)> _uriPositions = new();
+        // Top-level plan fields that give translated subtrees their context
+        // (extension URNs/URIs and declarations, execution behavior), copied verbatim.
+        readonly List<ProtoSlice> _headerFields = new();
+        // An extension URN anchor not used by the input plan, for the KQL query URN.
+        uint _kqlUrnAnchor = 1;
 
         public PushdownEngine(byte[] data) { _data = data; }
 
         public PushdownResult Execute()
         {
-            var span = _data.AsSpan();
-            int pos = 0;
+            var relations = new List<ProtoSlice>();
+            var otherFields = new List<ProtoSlice>();
 
-            var relationPositions = new List<(int start, int len)>();
-            var otherFieldPositions = new List<(int start, int end)>();
-
-            // Phase 1: Scan top-level fields
-            while (pos < span.Length)
+            // Phase 1: scan top-level fields.
+            var r = new ProtoReader(_data, 0, _data.Length);
+            int fieldStart = r.Position;
+            while (r.Next(out int field, out int wire))
             {
-                int tagStart = pos;
-                int tag = ReadTag(span, ref pos);
-                int fieldNumber = tag >> 3;
-                int wireType = tag & 0x7;
-
-                switch (fieldNumber)
+                if (field == F.Plan_Relations)
                 {
-                    case SubstraitFields.Plan_ExtensionDeclarations:
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        int end = pos + len;
-                        ParseExtensionDeclaration(span, pos, end);
-                        _extensionPositions.Add((tagStart, end));
-                        pos = end;
-                        break;
-                    }
-                    case SubstraitFields.Plan_Relations:
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        relationPositions.Add((pos, len));
-                        pos += len;
-                        break;
-                    }
-                    case SubstraitFields.Plan_ExtensionUris:
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        int end = pos + len;
-                        ParseExtensionUri(span, pos, end);
-                        _uriPositions.Add((tagStart, end));
-                        pos = end;
-                        break;
-                    }
-                    default:
-                    {
-                        SkipField(span, wireType, ref pos);
-                        otherFieldPositions.Add((tagStart, pos));
-                        break;
-                    }
+                    relations.Add(r.ReadSlice(wire));
                 }
+                else
+                {
+                    if (field is F.Plan_ExtensionUrns or F.Plan_ExtensionUris)
+                    {
+                        var urn = r.ReadMessage(wire);
+                        while (urn.Next(out int uf, out int uw))
+                        {
+                            if (uf == F.ExtensionUrn_Anchor) _kqlUrnAnchor = Math.Max(_kqlUrnAnchor, urn.ReadUInt32(uw) + 1);
+                            else urn.Skip(uw);
+                        }
+                    }
+                    else
+                    {
+                        r.Skip(wire);
+                    }
+                    var whole = new ProtoSlice(fieldStart, r.Position - fieldStart);
+                    if (field is F.Plan_ExtensionUrns or F.Plan_ExtensionUris or F.Plan_ExtensionDeclarations or F.Plan_ExecutionBehavior)
+                        _headerFields.Add(whole);
+                    else
+                        otherFields.Add(whole);
+                }
+                fieldStart = r.Position;
             }
 
-            if (relationPositions.Count == 0)
+            if (relations.Count == 0)
                 throw SubstraitTranslationException.MalformedPlan("Plan contains no relations.");
 
-            // Phase 2: Fast path — try full pushdown
+            // Phase 2: fast path, the whole plan translates.
             try
             {
-                var kqlWriter = new Utf8KqlWriter();
-                var fullReader = new SubstraitPlanReader(_data);
-                fullReader.WriteTo(kqlWriter);
-
-                var outputPlan = BuildFullyPushedPlan(kqlWriter);
-                return new PushdownResult(outputPlan, true, kqlWriter);
+                var (kql, columns) = SubstraitToKqlTranslator.TranslateWithSchema(_data);
+                if (TryBuildFullyPushedPlan(kql, columns, out var plan))
+                    return new PushdownResult(plan, true, kql);
             }
             catch (SubstraitTranslationException)
             {
-                // Full pushdown failed — continue to partial
+                // Fall through to partial pushdown.
             }
 
-            // Phase 3: Partial pushdown
+            // Phase 3: partial pushdown.
             var output = new ProtobufWriter(Math.Max(_data.Length, 256));
+            foreach (var f in _headerFields)
+                output.WriteRawBytes(_data.AsSpan(f.Start, f.Length));
+            WriteKqlUrn(output);
+            foreach (var f in otherFields)
+                output.WriteRawBytes(_data.AsSpan(f.Start, f.Length));
 
-            // Copy extension URIs and declarations
-            foreach (var (start, end) in _uriPositions)
-                output.WriteRawBytes(span.Slice(start, end - start));
-            foreach (var (start, end) in _extensionPositions)
-                output.WriteRawBytes(span.Slice(start, end - start));
-
-            // Add our KQL extension URI
-            WriteKqlExtUri(output);
-
-            // Copy other fields (version, etc.)
-            foreach (var (start, end) in otherFieldPositions)
-                output.WriteRawBytes(span.Slice(start, end - start));
-
-            // Process relations with partial pushdown
-            foreach (var (rStart, rLen) in relationPositions)
+            foreach (var rel in relations)
             {
-                var planRelContent = new ProtobufWriter(rLen + 64);
-                int p = rStart;
-                WritePartialPlanRel(_data, ref p, rStart + rLen, planRelContent);
-                output.WriteLengthDelimited(SubstraitFields.Plan_Relations, planRelContent);
+                var planRel = new ProtobufWriter(rel.Length + 64);
+                WritePartialPlanRel(new ProtoReader(_data, rel), planRel);
+                output.WriteLengthDelimited(F.Plan_Relations, planRel);
             }
 
             return new PushdownResult(output.WrittenMemory, false, null);
@@ -168,335 +142,263 @@ namespace KustoAdbc.Substrait
 
         #region Partial Plan Writing
 
-        void WritePartialPlanRel(byte[] data, ref int pos, int end, ProtobufWriter output)
+        void WritePartialPlanRel(ProtoReader r, ProtobufWriter output)
         {
-            var span = data.AsSpan();
-            while (pos < end)
+            int fieldStart = r.Position;
+            while (r.Next(out int field, out int wire))
             {
-                int tagStart = pos;
-                int tag = ReadTag(span, ref pos);
-                int fieldNumber = tag >> 3;
-                int wireType = tag & 0x7;
-
-                switch (fieldNumber)
+                if (field == F.PlanRel_Rel)
                 {
-                    case SubstraitFields.PlanRel_Rel:
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        var relWriter = new ProtobufWriter(len + 32);
-                        int p = pos;
-                        WritePartialRel(data, ref p, pos + len, relWriter);
-                        output.WriteLengthDelimited(SubstraitFields.PlanRel_Rel, relWriter);
-                        pos += len;
-                        return;
-                    }
-                    case SubstraitFields.PlanRel_Root:
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        var rootWriter = new ProtobufWriter(len + 32);
-                        int p = pos;
-                        WritePartialRelRoot(data, ref p, pos + len, rootWriter);
-                        output.WriteLengthDelimited(SubstraitFields.PlanRel_Root, rootWriter);
-                        pos += len;
-                        return;
-                    }
-                    default:
-                        SkipField(span, wireType, ref pos);
-                        output.WriteRawBytes(span.Slice(tagStart, pos - tagStart));
-                        break;
+                    var rel = r.ReadSlice(wire);
+                    output.WriteLengthDelimited(F.PlanRel_Rel, w => WritePartialRel(rel, w));
                 }
+                else if (field == F.PlanRel_Root)
+                {
+                    var root = r.ReadMessage(wire);
+                    output.WriteLengthDelimited(F.PlanRel_Root, w => WritePartialRelRoot(root, w));
+                }
+                else
+                {
+                    r.Skip(wire);
+                    output.WriteRawBytes(_data.AsSpan(fieldStart, r.Position - fieldStart));
+                }
+                fieldStart = r.Position;
             }
         }
 
-        void WritePartialRelRoot(byte[] data, ref int pos, int end, ProtobufWriter output)
+        void WritePartialRelRoot(ProtoReader r, ProtobufWriter output)
         {
-            var span = data.AsSpan();
-            while (pos < end)
+            int fieldStart = r.Position;
+            while (r.Next(out int field, out int wire))
             {
-                int tagStart = pos;
-                int tag = ReadTag(span, ref pos);
-                int fieldNumber = tag >> 3;
-                int wireType = tag & 0x7;
-
-                switch (fieldNumber)
+                if (field == F.RelRoot_Input)
                 {
-                    case SubstraitFields.RelRoot_Input:
-                    {
-                        int len = ReadVarint32(span, ref pos);
-                        var relWriter = new ProtobufWriter(len + 32);
-                        int p = pos;
-                        WritePartialRel(data, ref p, pos + len, relWriter);
-                        output.WriteLengthDelimited(SubstraitFields.RelRoot_Input, relWriter);
-                        pos += len;
-                        break;
-                    }
-                    default:
-                        SkipField(span, wireType, ref pos);
-                        output.WriteRawBytes(span.Slice(tagStart, pos - tagStart));
-                        break;
+                    var rel = r.ReadSlice(wire);
+                    output.WriteLengthDelimited(F.RelRoot_Input, w => WritePartialRel(rel, w));
                 }
+                else
+                {
+                    r.Skip(wire);
+                    output.WriteRawBytes(_data.AsSpan(fieldStart, r.Position - fieldStart));
+                }
+                fieldStart = r.Position;
             }
         }
 
-        void WritePartialRel(byte[] data, ref int pos, int end, ProtobufWriter output)
+        /// <summary>Writes the content of a Rel message: a KQL node if the subtree translates, else the original with rewritten children.</summary>
+        void WritePartialRel(ProtoSlice rel, ProtobufWriter output)
         {
-            var span = data.AsSpan();
-            int relStart = pos;
-            int relLen = end - pos;
-
-            // Speculative: try full subtree translation
-            string? kql = TryTranslateRel(relStart, relLen);
-            if (kql != null)
+            if (TryTranslateRel(rel, out var kql, out var columns))
             {
-                WriteKqlReadRel(output, kql);
-                pos = end;
+                WriteKqlReadRel(output, kql, columns);
                 return;
             }
 
-            // Partial: find relation type and recurse into children
-            int innerPos = pos;
-            while (innerPos < end)
+            var r = new ProtoReader(_data, rel);
+            int fieldStart = r.Position;
+            while (r.Next(out int relType, out int wire))
             {
-                int tag = ReadTag(span, ref innerPos);
-                int fieldNumber = tag >> 3;
-                int wireType = tag & 0x7;
-
-                if (fieldNumber >= SubstraitFields.Rel_Read && fieldNumber <= 20 && wireType == 2)
+                var childFields = ChildRelFields(relType);
+                if (childFields.Length == 0 || wire != ProtoReader.WireLengthDelimited)
                 {
-                    int len = ReadVarint32(span, ref innerPos);
-                    int relContentEnd = innerPos + len;
-
-                    var innerWriter = new ProtobufWriter(len + 32);
-                    int p = innerPos;
-                    WritePartialRelContent(data, ref p, relContentEnd, fieldNumber, innerWriter);
-                    output.WriteLengthDelimited(fieldNumber, innerWriter);
-                    pos = end;
-                    return;
+                    r.Skip(wire);
+                    output.WriteRawBytes(_data.AsSpan(fieldStart, r.Position - fieldStart));
                 }
                 else
                 {
-                    SkipField(span, wireType, ref innerPos);
+                    var content = r.ReadMessage(wire);
+                    output.WriteLengthDelimited(relType, w => WritePartialRelContent(content, childFields, w));
                 }
+                fieldStart = r.Position;
             }
-
-            // Couldn't parse — copy verbatim
-            output.WriteRawBytes(span.Slice(relStart, relLen));
-            pos = end;
         }
 
-        void WritePartialRelContent(byte[] data, ref int pos, int end, int relType, ProtobufWriter output)
+        void WritePartialRelContent(ProtoReader r, int[] childFields, ProtobufWriter output)
         {
-            var span = data.AsSpan();
-            var childRelFields = GetChildRelFields(relType);
-
-            while (pos < end)
+            int fieldStart = r.Position;
+            while (r.Next(out int field, out int wire))
             {
-                int tagStart = pos;
-                int tag = ReadTag(span, ref pos);
-                int fieldNumber = tag >> 3;
-                int wireType = tag & 0x7;
-
-                if (childRelFields.Contains(fieldNumber) && wireType == 2)
+                if (Array.IndexOf(childFields, field) >= 0 && wire == ProtoReader.WireLengthDelimited)
                 {
-                    int len = ReadVarint32(span, ref pos);
-                    int childEnd = pos + len;
-                    var childWriter = new ProtobufWriter(len + 32);
-                    int p = pos;
-                    WritePartialRel(data, ref p, childEnd, childWriter);
-                    output.WriteLengthDelimited(fieldNumber, childWriter);
-                    pos = childEnd;
+                    var child = r.ReadSlice(wire);
+                    output.WriteLengthDelimited(field, w => WritePartialRel(child, w));
                 }
                 else
                 {
-                    SkipField(span, wireType, ref pos);
-                    output.WriteRawBytes(span.Slice(tagStart, pos - tagStart));
+                    r.Skip(wire);
+                    output.WriteRawBytes(_data.AsSpan(fieldStart, r.Position - fieldStart));
                 }
+                fieldStart = r.Position;
             }
         }
 
-        static HashSet<int> GetChildRelFields(int relType) => relType switch
+        static readonly int[] s_noChildren = Array.Empty<int>();
+        static readonly int[] s_singleInput = { F.SingleInputRel_Input };
+        static readonly int[] s_biInputs = { F.BiRel_Left, F.BiRel_Right };
+        static readonly int[] s_multiInputs = { F.MultiInputRel_Inputs };
+
+        /// <summary>The fields of each relation message that hold child relations.</summary>
+        static int[] ChildRelFields(int relType) => relType switch
         {
-            SubstraitFields.Rel_Read => s_noChildren,
-            SubstraitFields.Rel_Filter => s_singleInput,     // FilterRel: input=2
-            SubstraitFields.Rel_Fetch => s_singleInput,      // FetchRel: input=2
-            SubstraitFields.Rel_Aggregate => s_singleInput,  // AggregateRel: input=2
-            SubstraitFields.Rel_Sort => s_singleInput,       // SortRel: input=2
-            SubstraitFields.Rel_Join => s_joinInputs,        // JoinRel: left=2, right=3
-            SubstraitFields.Rel_Project => s_singleInput,    // ProjectRel: input=2
+            F.Rel_Filter or F.Rel_Fetch or F.Rel_Aggregate or F.Rel_Sort or F.Rel_Project
+                or F.Rel_ExtensionSingle or F.Rel_Window or F.Rel_Exchange or F.Rel_Expand or F.Rel_TopN => s_singleInput,
+            F.Rel_Join or F.Rel_Cross or F.Rel_HashJoin or F.Rel_MergeJoin or F.Rel_NestedLoopJoin or F.Rel_LateralJoin => s_biInputs,
+            F.Rel_Set or F.Rel_ExtensionMulti => s_multiInputs,
             _ => s_noChildren,
         };
-
-        static readonly HashSet<int> s_noChildren = new();
-        static readonly HashSet<int> s_singleInput = new() { SubstraitFields.FilterRel_Input };
-        static readonly HashSet<int> s_joinInputs = new() { SubstraitFields.JoinRel_Left, SubstraitFields.JoinRel_Right };
 
         #endregion
 
         #region KQL Node Emission
 
-        string? TryTranslateRel(int relStart, int relLen)
+        bool TryTranslateRel(ProtoSlice rel, out Utf8KqlWriter kql, out List<KqlColumn> columns)
         {
             try
             {
-                var tempPlan = BuildTempPlan(relStart, relLen);
-                return SubstraitToKqlTranslator.Translate(tempPlan);
+                (kql, columns) = SubstraitToKqlTranslator.TranslateWithSchema(BuildTempPlan(rel));
+                // The replacement node must declare its output types; skip subtrees where some are unknown.
+                if (columns.All(c => TypeEncoder.CanEncode(c.Type)))
+                    return true;
             }
-            catch (SubstraitTranslationException) { return null; }
+            catch (SubstraitTranslationException)
+            {
+            }
+            kql = null!;
+            columns = null!;
+            return false;
         }
 
-        byte[] BuildTempPlan(int relStart, int relLen)
+        byte[] BuildTempPlan(ProtoSlice rel)
         {
-            var plan = new ProtobufWriter(relLen + 256);
-
-            // Copy extensions for function resolution
-            var span = _data.AsSpan();
-            foreach (var (start, end) in _uriPositions)
-                plan.WriteRawBytes(span.Slice(start, end - start));
-            foreach (var (start, end) in _extensionPositions)
-                plan.WriteRawBytes(span.Slice(start, end - start));
-
-            // Wrap rel in PlanRel { root { input: rel } }
-            var rootContent = new ProtobufWriter(relLen + 16);
-            rootContent.WriteBytesField(1, span.Slice(relStart, relLen));
-            var planRelContent = new ProtobufWriter(rootContent.Length + 8);
-            planRelContent.WriteLengthDelimited(2, rootContent);
-            plan.WriteLengthDelimited(3, planRelContent);
-
+            var plan = new ProtobufWriter(rel.Length + 256);
+            foreach (var f in _headerFields)
+                plan.WriteRawBytes(_data.AsSpan(f.Start, f.Length));
+            plan.WriteLengthDelimited(F.Plan_Relations, planRel =>
+                planRel.WriteLengthDelimited(F.PlanRel_Root, root =>
+                    root.WriteBytesField(F.RelRoot_Input, _data.AsSpan(rel.Start, rel.Length))));
             return plan.ToArray();
         }
 
-        void WriteKqlReadRel(ProtobufWriter output, string kql)
+        static void WriteKqlReadRel(ProtobufWriter output, Utf8KqlWriter kql, List<KqlColumn> columns)
         {
-            var namedTableContent = new ProtobufWriter(kql.Length + 32);
-            namedTableContent.WriteStringField(SubstraitFields.NamedTable_Names, SubstraitPartialPushdown.KqlFunctionName);
-            namedTableContent.WriteStringField(SubstraitFields.NamedTable_Names, kql);
-
-            var readRelContent = new ProtobufWriter(namedTableContent.Length + 8);
-            readRelContent.WriteLengthDelimited(SubstraitFields.ReadRel_NamedTable, namedTableContent);
-
-            output.WriteLengthDelimited(SubstraitFields.Rel_Read, readRelContent);
-        }
-
-        void WriteKqlExtUri(ProtobufWriter output)
-        {
-            var uriContent = new ProtobufWriter(64);
-            uriContent.WriteVarintField(SubstraitFields.ExtensionUri_Anchor, SubstraitPartialPushdown.KqlUriAnchor);
-            uriContent.WriteStringField(SubstraitFields.ExtensionUri_Uri, SubstraitPartialPushdown.KqlExtensionUri);
-            output.WriteLengthDelimited(SubstraitFields.Plan_ExtensionUris, uriContent);
-        }
-
-        byte[] BuildFullyPushedPlan(Utf8KqlWriter kql)
-        {
-            var output = new ProtobufWriter(_data.Length);
-            WriteKqlExtUri(output);
-
-            var relWriter = new ProtobufWriter(kql.Length + 64);
-            WriteKqlReadRel(relWriter, kql.ToString());
-
-            var rootWriter = new ProtobufWriter(relWriter.Length + 8);
-            rootWriter.WriteLengthDelimited(SubstraitFields.RelRoot_Input, relWriter);
-
-            var planRelWriter = new ProtobufWriter(rootWriter.Length + 8);
-            planRelWriter.WriteLengthDelimited(SubstraitFields.PlanRel_Root, rootWriter);
-
-            output.WriteLengthDelimited(SubstraitFields.Plan_Relations, planRelWriter);
-
-            return output.ToArray();
-        }
-
-        #endregion
-
-        #region Extension Parsing
-
-        void ParseExtensionUri(ReadOnlySpan<byte> span, int pos, int end)
-        {
-            int anchor = 0; string? uri = null;
-            while (pos < end)
+            output.WriteLengthDelimited(F.Rel_Read, read =>
             {
-                int tag = ReadTag(span, ref pos);
-                int fn = tag >> 3; int wt = tag & 0x7;
-                switch (fn)
+                read.WriteLengthDelimited(F.ReadRel_BaseSchema, schema =>
                 {
-                    case SubstraitFields.ExtensionUri_Anchor: anchor = ReadVarint32(span, ref pos); break;
-                    case SubstraitFields.ExtensionUri_Uri:
-                        int len = ReadVarint32(span, ref pos);
-#if NETSTANDARD2_0
-                        uri = Encoding.UTF8.GetString(span.Slice(pos, len).ToArray());
-#else
-                        uri = Encoding.UTF8.GetString(span.Slice(pos, len));
-#endif
-                        pos += len; break;
-                    default: SkipField(span, wt, ref pos); break;
-                }
-            }
-            if (uri != null && !_functionAnchors.ContainsKey(anchor))
-                _functionAnchors[anchor] = uri;
-        }
-
-        void ParseExtensionDeclaration(ReadOnlySpan<byte> span, int pos, int end)
-        {
-            while (pos < end)
-            {
-                int tag = ReadTag(span, ref pos);
-                int fn = tag >> 3; int wt = tag & 0x7;
-                if (fn == SubstraitFields.ExtensionDecl_ExtensionFunction && wt == 2)
-                {
-                    int len = ReadVarint32(span, ref pos);
-                    int fEnd = pos + len;
-                    int anchor = 0; string? name = null;
-                    while (pos < fEnd)
+                    foreach (var c in columns)
+                        schema.WriteStringField(F.NamedStruct_Names, c.Name);
+                    schema.WriteLengthDelimited(F.NamedStruct_Struct, st =>
                     {
-                        int t2 = ReadTag(span, ref pos);
-                        int fn2 = t2 >> 3; int wt2 = t2 & 0x7;
-                        switch (fn2)
-                        {
-                            case SubstraitFields.ExtensionFunction_Anchor: anchor = ReadVarint32(span, ref pos); break;
-                            case SubstraitFields.ExtensionFunction_Name:
-                                int slen = ReadVarint32(span, ref pos);
-#if NETSTANDARD2_0
-                                name = Encoding.UTF8.GetString(span.Slice(pos, slen).ToArray());
-#else
-                                name = Encoding.UTF8.GetString(span.Slice(pos, slen));
-#endif
-                                pos += slen; break;
-                            default: SkipField(span, wt2, ref pos); break;
-                        }
-                    }
-                    if (name != null) _functionAnchors[anchor] = name;
-                    pos = fEnd;
-                }
-                else SkipField(span, wt, ref pos);
-            }
+                        foreach (var c in columns)
+                            st.WriteLengthDelimited(F.StructType_Types, t => TypeEncoder.Write(t, c.Type));
+                        st.WriteVarintField(F.StructType_Nullability, F.Nullability_Required);
+                    });
+                });
+                read.WriteLengthDelimited(F.ReadRel_NamedTable, table =>
+                {
+                    table.WriteStringField(F.NamedTable_Names, SubstraitPartialPushdown.KqlFunctionName);
+                    table.WriteStringField(F.NamedTable_Names, kql.ToString());
+                });
+            });
         }
 
-        #endregion
-
-        #region Protobuf Helpers
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static int ReadTag(ReadOnlySpan<byte> span, ref int pos) => ReadVarint32(span, ref pos);
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static int ReadVarint32(ReadOnlySpan<byte> span, ref int pos)
+        void WriteKqlUrn(ProtobufWriter output)
         {
-            int result = 0; int shift = 0; byte b;
-            do { b = span[pos++]; result |= (b & 0x7F) << shift; shift += 7; }
-            while ((b & 0x80) != 0);
-            return result;
-        }
-
-        static void SkipField(ReadOnlySpan<byte> span, int wireType, ref int pos)
-        {
-            switch (wireType)
+            output.WriteLengthDelimited(F.Plan_ExtensionUrns, urn =>
             {
-                case 0: while ((span[pos++] & 0x80) != 0) { } break;
-                case 1: pos += 8; break;
-                case 2: int len = ReadVarint32(span, ref pos); pos += len; break;
-                case 5: pos += 4; break;
-                default: throw new InvalidOperationException($"Unknown wire type: {wireType}");
-            }
+                urn.WriteVarintField(F.ExtensionUrn_Anchor, (int)_kqlUrnAnchor);
+                urn.WriteStringField(F.ExtensionUrn_Urn, SubstraitPartialPushdown.KqlExtensionUrn);
+            });
+        }
+
+        bool TryBuildFullyPushedPlan(Utf8KqlWriter kql, List<KqlColumn> columns, out ReadOnlyMemory<byte> plan)
+        {
+            plan = default;
+            if (!columns.All(c => TypeEncoder.CanEncode(c.Type)))
+                return false;
+
+            var output = new ProtobufWriter(kql.Length + 256);
+            WriteKqlUrn(output);
+            output.WriteLengthDelimited(F.Plan_Relations, planRel =>
+                planRel.WriteLengthDelimited(F.PlanRel_Root, root =>
+                {
+                    root.WriteLengthDelimited(F.RelRoot_Input, rel => WriteKqlReadRel(rel, kql, columns));
+                    foreach (var c in columns)
+                        root.WriteStringField(F.RelRoot_Names, c.Name);
+                }));
+            plan = output.WrittenMemory;
+            return true;
         }
 
         #endregion
+    }
+
+    /// <summary>
+    /// Encodes the type of a KQL query's output column as a Substrait Type message. The declared
+    /// type is the one the driver returns for the corresponding Kusto type (see Arrow/Property.cs):
+    /// decimal as fp64, guid as string, datetime as timestamp[us, UTC], timespan as duration[us].
+    /// Every column is declared nullable, since Kusto doesn't track nullability.
+    /// </summary>
+    static class TypeEncoder
+    {
+        public static bool CanEncode(SType type) => FieldFor(AsReturned(type).Kind) != 0;
+
+        static SType AsReturned(SType type) => type.Kind switch
+        {
+            TypeKind.Decimal => SType.Fp64,
+            TypeKind.Uuid or TypeKind.VarChar or TypeKind.FixedChar => SType.String,
+            TypeKind.Date or TypeKind.PrecisionTimestamp or TypeKind.PrecisionTimestampTz => new SType(TypeKind.PrecisionTimestampTz, precision: 6),
+            TypeKind.IntervalDay => new SType(TypeKind.IntervalDay, precision: 6),
+            _ => type,
+        };
+
+        public static void Write(ProtobufWriter output, SType declared)
+        {
+            var type = AsReturned(declared);
+            int nullability = F.Nullability_Nullable;
+            output.WriteLengthDelimited(FieldFor(type.Kind), t =>
+            {
+                switch (type.Kind)
+                {
+                    case TypeKind.Decimal:
+                        t.WriteVarintField(F.DecimalType_Scale, type.Scale);
+                        t.WriteVarintField(F.DecimalType_Precision, type.Precision);
+                        t.WriteVarintField(F.DecimalType_Nullability, nullability);
+                        break;
+                    case TypeKind.PrecisionTimestamp:
+                    case TypeKind.PrecisionTimestampTz:
+                    case TypeKind.FixedChar:
+                    case TypeKind.VarChar:
+                        t.WriteVarintField(F.PrecisionType_Precision, type.Precision);
+                        t.WriteVarintField(F.ParameterizedType_Nullability, nullability);
+                        break;
+                    case TypeKind.IntervalDay:
+                        t.WriteVarintField(F.SimpleType_Nullability, nullability);
+                        t.WriteVarintField(F.IntervalDayType_Precision, type.Precision);
+                        break;
+                    default:
+                        t.WriteVarintField(F.SimpleType_Nullability, nullability);
+                        break;
+                }
+            });
+        }
+
+        static int FieldFor(TypeKind kind) => kind switch
+        {
+            TypeKind.Bool => F.Type_Bool,
+            TypeKind.I32 => F.Type_I32,
+            TypeKind.I64 => F.Type_I64,
+            TypeKind.Fp64 => F.Type_Fp64,
+            TypeKind.String => F.Type_String,
+            TypeKind.VarChar => F.Type_VarChar,
+            TypeKind.FixedChar => F.Type_FixedChar,
+            TypeKind.Date => F.Type_Date,
+            TypeKind.IntervalDay => F.Type_IntervalDay,
+            TypeKind.Uuid => F.Type_Uuid,
+            TypeKind.Decimal => F.Type_Decimal,
+            TypeKind.PrecisionTimestamp => F.Type_PrecisionTimestamp,
+            TypeKind.PrecisionTimestampTz => F.Type_PrecisionTimestampTz,
+            _ => 0,
+        };
     }
 }

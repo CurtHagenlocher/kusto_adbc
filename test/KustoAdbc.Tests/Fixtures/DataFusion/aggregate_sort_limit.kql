@@ -1,0 +1,7 @@
+['orders']
+| project ['name'] = tostring(['name']), ['price'] = toreal(['price']), ['qty']
+| where (['qty'] > int(5))
+| summarize _a0 = iif(countif(isnotnull(['price'])) < 1, real(null), sum(['price'])) by ['name']
+| sort by _a0 desc nulls first
+| take 10
+| project ['name'], ['total'] = _a0

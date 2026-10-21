@@ -1,0 +1,4 @@
+['orders']
+| project ['price'] = toreal(['price'])
+| extend _e0 = abs(['price']), _e1 = round(['price'], int(2)), _e2 = ceiling(['price']), _e3 = floor(['price'], 1.0), _e4 = sqrt(['price']), _e5 = pow(['price'], real(2.0))
+| project ['a'] = _e0, ['r'] = _e1, ['c'] = _e2, ['f'] = _e3, ['s'] = _e4, ['p'] = _e5

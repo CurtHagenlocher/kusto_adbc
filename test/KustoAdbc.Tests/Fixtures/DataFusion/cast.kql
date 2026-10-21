@@ -1,0 +1,4 @@
+['orders']
+| project ['price'] = toreal(['price']), ['qty']
+| extend _e0 = tolong(['qty']), _e1 = tostring(['price'])
+| project ['q'] = _e0, ['p'] = _e1

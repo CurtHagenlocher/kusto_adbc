@@ -1,0 +1,758 @@
+%YAML 1.2
+---
+# Substrait dialect for the Kusto ADBC driver (Azure Data Explorer / KQL).
+#
+# This file follows the Substrait dialect schema
+# (https://github.com/substrait-io/substrait/blob/main/text/dialect_schema.yaml)
+# and lists exactly what the driver's Substrait-to-KQL translator accepts.
+# A plan that uses only what is listed here translates to KQL; anything else
+# is rejected with an error (or left for client-side execution by partial
+# pushdown). The translator's function catalog (KqlFunctionCatalog.cs) is
+# checked against this file by a unit test.
+#
+# Conventions used below
+# ----------------------
+# * required_options: for each option, the behavior the translation delivers.
+#   A plan may omit the option (Substrait then lets the consumer choose) or
+#   list this value among its preferences. A function that can deliver several
+#   behaviors is listed once per behavior. Options not listed for a function
+#   cannot be delivered, and a plan that requests them is rejected.
+# * Behaviors Kusto does not document (integer overflow, integer division by
+#   zero, tie-breaking in round()) are deliberately not declared.
+# * Constraints the dialect schema cannot express are recorded under
+#   metadata.kusto_constraints, for humans and for producers that read them.
+
+name: Kusto
+
+metadata:
+  description: >
+    Substrait support of the Kusto ADBC driver, which translates Substrait plans
+    into Kusto Query Language (KQL) for Azure Data Explorer.
+  kql_reference: https://learn.microsoft.com/kusto/query/
+  substrait_version: "0.107.0"
+  semantics:
+    strings: >
+      Kusto string values cannot be null; a missing string is the empty string.
+      String nulls in plans are therefore translated to '' and is_null on a
+      string tests for the empty string (isempty). Empty strings and missing
+      values are indistinguishable.
+    null_comparisons: >
+      With one null operand, Kusto's == returns false and != returns true (other
+      operators propagate null). The translator restores Substrait's null result
+      where it matters, so this difference is not observable.
+    nan_ordering: NaN sorts after all other numbers (observed), as in PostgreSQL and DataFusion.
+    string_ordering: >
+      Strings are compared and sorted ordinally (strcmp), which can differ from
+      a collation-aware engine.
+    timestamps: >
+      Kusto datetime values are UTC with 100 ns resolution, covering years
+      1 to 9999. The driver returns them as Arrow timestamp[us, UTC].
+    result_limits: >
+      Kusto truncates query results at 500,000 rows or 64 MB by default, unless
+      the request disables truncation.
+    driver_column_types: >
+      The driver reports Kusto decimal columns as fp64, guid columns as string
+      and dynamic columns as string. Plans should treat such columns with
+      those types; the translator converts base_schema columns declared fp64
+      or string accordingly (toreal / tostring).
+
+dependencies:
+  arithmetic: extension:io.substrait:functions_arithmetic
+  comparison: extension:io.substrait:functions_comparison
+  boolean: extension:io.substrait:functions_boolean
+  string: extension:io.substrait:functions_string
+  datetime: extension:io.substrait:functions_datetime
+  rounding: extension:io.substrait:functions_rounding
+  logarithmic: extension:io.substrait:functions_logarithmic
+  aggregate_generic: extension:io.substrait:functions_aggregate_generic
+  aggregate_approx: extension:io.substrait:functions_aggregate_approx
+
+# ════════════════════════════════════════════════════════════════════
+# Types
+# ════════════════════════════════════════════════════════════════════
+# Kusto has no 8/16-bit integers, 32-bit floats, binary, fixed-length strings,
+# time-of-day or year-month intervals.
+
+supported_types:
+  - type: BOOL
+    system_metadata: { name: bool, supported_as_column: true }
+  - type: I32
+    system_metadata: { name: int, supported_as_column: true }
+  - type: I64
+    system_metadata: { name: long, supported_as_column: true }
+  - type: FP64
+    system_metadata: { name: real, supported_as_column: true }
+  - type: STRING
+    system_metadata: { name: string, supported_as_column: true }
+  - type: PRECISION_TIMESTAMP_TZ
+    max_precision: 7
+    system_metadata: { name: datetime, supported_as_column: true }
+  - type: PRECISION_TIMESTAMP
+    max_precision: 7
+    metadata:
+      note: Translated to a UTC datetime.
+    system_metadata: { name: datetime, supported_as_column: false }
+  - type: DATE
+    metadata:
+      note: Translated to a datetime at midnight UTC.
+    system_metadata: { name: datetime, supported_as_column: false }
+  - type: INTERVAL_DAY
+    max_precision: 7
+    system_metadata: { name: timespan, supported_as_column: true }
+  - type: DECIMAL
+    max_precision: 28
+    max_scale: 28
+    metadata:
+      note: Decimal columns are reported by the driver as fp64; decimal literals and casts are supported.
+    system_metadata: { name: decimal, supported_as_column: false }
+  - type: UUID
+    metadata:
+      note: Guid columns are reported by the driver as string; uuid literals and casts are supported.
+    system_metadata: { name: guid, supported_as_column: false }
+
+# ════════════════════════════════════════════════════════════════════
+# Relations
+# ════════════════════════════════════════════════════════════════════
+
+supported_relations:
+  - relation: READ
+    read_types: [NAMED_TABLE]
+    metadata:
+      kusto_constraints:
+        - "NamedTable names are [table], [database, table] or [cluster, database, table]."
+        - "base_schema is required and must be flat (no struct columns)."
+        - "filter and best_effort_filter are applied; projection may select top-level columns only."
+  - relation: FILTER
+  - relation: PROJECT
+  - relation: FETCH
+    metadata:
+      kusto_constraints:
+        - "offset and count must be integer literals."
+  - relation: SORT
+    metadata:
+      kusto_constraints:
+        - "Sort fields use a sort direction; custom comparison functions are not supported."
+  - relation: TOP_N
+    metadata:
+      kusto_constraints:
+        - "offset and count must be integer literals; WITH TIES is not supported."
+  - relation: AGGREGATE
+    metadata:
+      kusto_constraints:
+        - "At most one grouping set (no GROUPING SETS, ROLLUP or CUBE)."
+        - "Aggregate functions must use phase INITIAL_TO_RESULT and have no sort fields."
+        - "DISTINCT invocation is supported for count only."
+        - "Measure filters are supported except for population std_dev and median."
+  - relation: JOIN
+    join_types: [INNER, OUTER, LEFT, RIGHT, LEFT_SEMI, RIGHT_SEMI, LEFT_ANTI, RIGHT_ANTI]
+    metadata:
+      kusto_constraints:
+        - "Kusto joins match on equality between a left and a right column. Other conjuncts of the join condition are accepted only where they can be applied as filters: after an INNER join, or on the input whose rows they restrict for outer, semi and anti joins."
+        - "Kusto join keys match when both are null (observed); the translator removes null-keyed rows, or adds a marker key for full outer joins, so that equal() keys never match nulls. is_not_distinct_from keys are supported natively. Empty strings (Kusto's missing string) match each other."
+        - "post_join_filter is supported for INNER, OUTER, LEFT and RIGHT joins."
+        - "LEFT_ANTI has NOT EXISTS semantics; null-aware anti joins (NOT IN) are not distinguished."
+  - relation: CROSS
+  - relation: SET
+    operations: [UNION_ALL, UNION_DISTINCT]
+
+# ════════════════════════════════════════════════════════════════════
+# Expressions
+# ════════════════════════════════════════════════════════════════════
+
+supported_expressions:
+  - expression: LITERAL
+    metadata:
+      kusto_constraints:
+        - "Literals of the supported types only; timestamps must be representable with 100 ns ticks in years 1-9999."
+  - expression: SELECTION
+    metadata:
+      kusto_constraints:
+        - "Direct references to top-level struct fields only; no outer, masked, list or map references."
+  - SCALAR_FUNCTION
+  - IF_THEN
+  - SWITCH
+  - SINGULAR_OR_LIST
+  - MULTI_OR_LIST
+  - expression: CAST
+    failure_options: [RETURN_NULL]
+    metadata:
+      kusto_constraints:
+        - "Target types: boolean, i32, i64, fp64, string, decimal, timestamp, timestamp_tz, date, interval_day, uuid."
+        - "Decimal targets only from integers or decimals that fit without rounding (todecimal() neither rounds nor checks precision)."
+        - "Timestamp targets with precision below 7 only from timestamps of that precision or less."
+        - "No casts from timestamps, dates or intervals to string (KQL formats them differently)."
+        - "THROW_EXCEPTION only for casts that cannot fail."
+  - expression: EXECUTION_CONTEXT_VARIABLE
+    variable_types: [CURRENT_TIMESTAMP, CURRENT_TIMEZONE, CURRENT_DATE]
+
+supported_execution_behavior:
+  supported_variable_evaluation_mode: [PER_PLAN]
+
+# ════════════════════════════════════════════════════════════════════
+# Scalar functions
+# ════════════════════════════════════════════════════════════════════
+
+supported_scalar_functions:
+
+  # ── functions_arithmetic ──────────────────────────────────────────
+  # KQL evaluates integer arithmetic as long; i32 results are converted back with toint().
+  # Behaviors marked "observed" were measured on help.kusto.windows.net (2026-10-20); Kusto's
+  # documentation doesn't specify them.
+  - source: arithmetic
+    name: add
+    metadata:
+      note: Observed - integer overflow wraps (two's complement), for long and for toint() of an i32 result.
+    system_metadata: { name: "+", notation: INFIX }
+    required_options:
+      overflow: SILENT
+    supported_impls: [i32_i32, i64_i64]
+  - source: arithmetic
+    name: add
+    system_metadata: { name: "+", notation: INFIX }
+    supported_impls: [fp64_fp64]
+  - source: arithmetic
+    name: subtract
+    system_metadata: { name: "-", notation: INFIX }
+    required_options:
+      overflow: SILENT
+    supported_impls: [i32_i32, i64_i64]
+  - source: arithmetic
+    name: subtract
+    system_metadata: { name: "-", notation: INFIX }
+    supported_impls: [fp64_fp64]
+  - source: arithmetic
+    name: multiply
+    system_metadata: { name: "*", notation: INFIX }
+    required_options:
+      overflow: SILENT
+    supported_impls: [i32_i32, i64_i64]
+  - source: arithmetic
+    name: multiply
+    system_metadata: { name: "*", notation: INFIX }
+    supported_impls: [fp64_fp64]
+  - source: arithmetic
+    name: divide
+    metadata:
+      note: >
+        Integer division truncates toward zero; division by zero returns null (observed).
+        long.MinValue / -1 raises an overflow error (observed), so no overflow behavior is declared.
+    system_metadata: { name: "/", notation: INFIX }
+    required_options:
+      on_division_by_zero: "NULL"
+    supported_impls: [i32_i32, i64_i64]
+  - source: arithmetic
+    name: divide
+    system_metadata: { name: "/", notation: INFIX }
+    required_options:
+      on_division_by_zero: IEEE
+      on_domain_error: NAN
+    supported_impls: [fp64_fp64]
+  - source: arithmetic
+    name: modulus
+    metadata:
+      note: Computed as x - y * (x / y), since KQL's % operator is not the truncating remainder.
+    system_metadata: { name: "%", notation: INFIX }
+    required_options:
+      division_type: TRUNCATE
+      on_domain_error: "NULL"
+    supported_impls: [i32_i32, i64_i64]
+  - source: arithmetic
+    name: negate
+    system_metadata: { name: "-", notation: PREFIX }
+    supported_impls: [i32, i64, fp64]
+  - source: arithmetic
+    name: abs
+    system_metadata: { name: abs }
+    supported_impls: [i32, i64, fp64]
+  - source: arithmetic
+    name: sign
+    system_metadata: { name: sign }
+    supported_impls: [i32, i64, fp64]
+  - source: arithmetic
+    name: power
+    system_metadata: { name: pow }
+    supported_impls: [fp64_fp64]
+  - source: arithmetic
+    name: sqrt
+    metadata:
+      note: Observed - returns NaN for negative input (Kusto's documentation says null).
+    system_metadata: { name: sqrt }
+    required_options:
+      on_domain_error: NAN
+    supported_impls: [i64, fp64]
+  - source: arithmetic
+    name: exp
+    system_metadata: { name: exp }
+    supported_impls: [i64, fp64]
+  - source: arithmetic
+    name: sin
+    system_metadata: { name: sin }
+    supported_impls: [fp64]
+  - source: arithmetic
+    name: cos
+    system_metadata: { name: cos }
+    supported_impls: [fp64]
+  - source: arithmetic
+    name: tan
+    system_metadata: { name: tan }
+    supported_impls: [fp64]
+  - source: arithmetic
+    name: asin
+    system_metadata: { name: asin }
+    supported_impls: [fp64]
+  - source: arithmetic
+    name: acos
+    system_metadata: { name: acos }
+    supported_impls: [fp64]
+  - source: arithmetic
+    name: atan
+    system_metadata: { name: atan }
+    supported_impls: [fp64]
+  - source: arithmetic
+    name: degrees
+    system_metadata: { name: degrees }
+    supported_impls: [fp64]
+  - source: arithmetic
+    name: radians
+    system_metadata: { name: radians }
+    supported_impls: [fp64]
+  - source: arithmetic
+    name: bitwise_and
+    system_metadata: { name: binary_and }
+    supported_impls: [i64_i64]
+  - source: arithmetic
+    name: bitwise_or
+    system_metadata: { name: binary_or }
+    supported_impls: [i64_i64]
+  - source: arithmetic
+    name: bitwise_xor
+    system_metadata: { name: binary_xor }
+    supported_impls: [i64_i64]
+  - source: arithmetic
+    name: bitwise_not
+    system_metadata: { name: binary_not }
+    supported_impls: [i64]
+
+  # ── functions_comparison ──────────────────────────────────────────
+  - source: comparison
+    name: equal
+    system_metadata: { name: "==", notation: INFIX }
+    supported_impls: [any_any]
+  - source: comparison
+    name: not_equal
+    system_metadata: { name: "!=", notation: INFIX }
+    supported_impls: [any_any]
+  - source: comparison
+    name: lt
+    metadata:
+      note: Strings are compared with strcmp(), since KQL does not define < on strings.
+      kusto_constraints:
+        - "lt, lte, gt, gte and between are not supported on boolean or uuid values (KQL defines no ordering for them)."
+    system_metadata: { name: "<", notation: INFIX }
+    supported_impls: [any_any]
+  - source: comparison
+    name: lte
+    system_metadata: { name: "<=", notation: INFIX }
+    supported_impls: [any_any]
+  - source: comparison
+    name: gt
+    system_metadata: { name: ">", notation: INFIX }
+    supported_impls: [any_any]
+  - source: comparison
+    name: gte
+    system_metadata: { name: ">=", notation: INFIX }
+    supported_impls: [any_any]
+  - source: comparison
+    name: between
+    metadata:
+      note: Translated to (x >= low and x <= high).
+    system_metadata: { name: between, notation: INFIX }
+    supported_impls: [any_any_any]
+  - source: comparison
+    name: is_null
+    metadata:
+      note: Translated to isempty() for strings, since Kusto strings are never null.
+    system_metadata: { name: isnull }
+    supported_impls: [any]
+  - source: comparison
+    name: is_not_null
+    metadata:
+      note: Translated to isnotempty() for strings.
+    system_metadata: { name: isnotnull }
+    supported_impls: [any]
+  - source: comparison
+    name: is_nan
+    system_metadata: { name: isnan }
+    supported_impls: [fp64]
+  - source: comparison
+    name: is_finite
+    system_metadata: { name: isfinite }
+    supported_impls: [fp64]
+  - source: comparison
+    name: is_infinite
+    system_metadata: { name: isinf }
+    supported_impls: [fp64]
+  - source: comparison
+    name: is_true
+    system_metadata: { name: coalesce }
+    supported_impls: [bool]
+  - source: comparison
+    name: is_not_true
+    system_metadata: { name: coalesce }
+    supported_impls: [bool]
+  - source: comparison
+    name: is_false
+    system_metadata: { name: coalesce }
+    supported_impls: [bool]
+  - source: comparison
+    name: is_not_false
+    system_metadata: { name: coalesce }
+    supported_impls: [bool]
+  - source: comparison
+    name: nullif
+    system_metadata: { name: iif }
+    supported_impls: [any_any]
+  - source: comparison
+    name: coalesce
+    metadata:
+      note: Kusto's coalesce also skips empty strings.
+    system_metadata: { name: coalesce }
+    supported_impls: [any]
+    variadic: { min: 2, max: 64 }
+  - source: comparison
+    name: is_distinct_from
+    system_metadata: { name: iif }
+    supported_impls: [any_any]
+  - source: comparison
+    name: is_not_distinct_from
+    system_metadata: { name: iif }
+    supported_impls: [any_any]
+
+  # ── functions_boolean ─────────────────────────────────────────────
+  # The extension allows and()/or() with zero arguments (true/false), which the
+  # dialect schema cannot express (variadic.min must be at least 1).
+  - source: boolean
+    name: and
+    system_metadata: { name: and, notation: INFIX }
+    supported_impls: [bool]
+    variadic: {}
+  - source: boolean
+    name: or
+    system_metadata: { name: or, notation: INFIX }
+    supported_impls: [bool]
+    variadic: {}
+  - source: boolean
+    name: not
+    system_metadata: { name: not }
+    supported_impls: [bool]
+  - source: boolean
+    name: and_not
+    system_metadata: { name: and, notation: INFIX }
+    supported_impls: [bool_bool]
+  - source: boolean
+    name: xor
+    system_metadata: { name: "!=", notation: INFIX }
+    supported_impls: [bool_bool]
+
+  # ── functions_string ──────────────────────────────────────────────
+  - source: string
+    name: concat
+    system_metadata: { name: strcat }
+    required_options:
+      null_handling: IGNORE_NULLS
+    supported_impls: [str]
+    variadic: { min: 1, max: 64 }
+  - source: string
+    name: like
+    metadata:
+      kusto_constraints:
+        - "The pattern must be a string literal without backslashes; it is translated to an anchored regular expression ('%' and '_' are the wildcards)."
+    system_metadata: { name: matches regex, notation: INFIX }
+    required_options:
+      case_sensitivity: CASE_SENSITIVE
+    supported_impls: [str_str]
+  - source: string
+    name: like
+    system_metadata: { name: matches regex, notation: INFIX }
+    required_options:
+      case_sensitivity: CASE_INSENSITIVE
+    supported_impls: [str_str]
+  - source: string
+    name: substring
+    metadata:
+      note: Positions count Unicode code points.
+    system_metadata: { name: substring }
+    required_options:
+      negative_start: LEFT_OF_BEGINNING
+    supported_impls: [str_i32_i32, str_i32]
+  - source: string
+    name: starts_with
+    system_metadata: { name: startswith_cs, notation: INFIX }
+    required_options:
+      case_sensitivity: CASE_SENSITIVE
+    supported_impls: [str_str]
+  - source: string
+    name: starts_with
+    system_metadata: { name: startswith, notation: INFIX }
+    required_options:
+      case_sensitivity: CASE_INSENSITIVE
+    supported_impls: [str_str]
+  - source: string
+    name: ends_with
+    system_metadata: { name: endswith_cs, notation: INFIX }
+    required_options:
+      case_sensitivity: CASE_SENSITIVE
+    supported_impls: [str_str]
+  - source: string
+    name: ends_with
+    system_metadata: { name: endswith, notation: INFIX }
+    required_options:
+      case_sensitivity: CASE_INSENSITIVE
+    supported_impls: [str_str]
+  - source: string
+    name: contains
+    system_metadata: { name: contains_cs, notation: INFIX }
+    required_options:
+      case_sensitivity: CASE_SENSITIVE
+    supported_impls: [str_str]
+  - source: string
+    name: contains
+    system_metadata: { name: contains, notation: INFIX }
+    required_options:
+      case_sensitivity: CASE_INSENSITIVE
+    supported_impls: [str_str]
+  - source: string
+    name: strpos
+    system_metadata: { name: indexof }
+    required_options:
+      case_sensitivity: CASE_SENSITIVE
+    supported_impls: [str_str]
+  - source: string
+    name: replace
+    system_metadata: { name: replace_string }
+    required_options:
+      case_sensitivity: CASE_SENSITIVE
+    supported_impls: [str_str_str]
+  - source: string
+    name: repeat
+    system_metadata: { name: strrep }
+    supported_impls: [str_i64]
+  - source: string
+    name: reverse
+    system_metadata: { name: reverse }
+    supported_impls: [str]
+  - source: string
+    name: lower
+    system_metadata: { name: tolower }
+    required_options:
+      char_set: UTF8
+    supported_impls: [str]
+  - source: string
+    name: upper
+    system_metadata: { name: toupper }
+    required_options:
+      char_set: UTF8
+    supported_impls: [str]
+  - source: string
+    name: char_length
+    metadata:
+      note: Counts Unicode code points.
+    system_metadata: { name: strlen }
+    supported_impls: [str]
+  - source: string
+    name: ltrim
+    metadata:
+      kusto_constraints:
+        - "The characters argument must be a string literal."
+    system_metadata: { name: trim_start }
+    supported_impls: [str_str]
+  - source: string
+    name: rtrim
+    metadata:
+      kusto_constraints:
+        - "The characters argument must be a string literal."
+    system_metadata: { name: trim_end }
+    supported_impls: [str_str]
+  - source: string
+    name: trim
+    metadata:
+      kusto_constraints:
+        - "The characters argument must be a string literal."
+    system_metadata: { name: trim }
+    supported_impls: [str_str]
+
+  # ── functions_datetime ────────────────────────────────────────────
+  - source: datetime
+    name: extract
+    metadata:
+      kusto_constraints:
+        - "Supported components: YEAR, QUARTER, MONTH, DAY, DAY_OF_YEAR, ISO_WEEK, MONDAY_DAY_OF_WEEK, SUNDAY_DAY_OF_WEEK, HOUR, MINUTE, SECOND, MILLISECOND, MICROSECOND, NANOSECOND, SUBSECOND, UNIX_TIME."
+        - "The time zone argument must be a literal naming UTC."
+    system_metadata: { name: datetime_part }
+    supported_impls: [req_pts, req_ptstz_str, req_req_pts, req_req_ptstz_str]
+  - source: datetime
+    name: add
+    system_metadata: { name: "+", notation: INFIX }
+    supported_impls: [pts_iday, ptstz_iday]
+  - source: datetime
+    name: subtract
+    system_metadata: { name: "-", notation: INFIX }
+    supported_impls: [pts_iday, ptstz_iday]
+  - source: datetime
+    name: multiply
+    system_metadata: { name: "*", notation: INFIX }
+    supported_impls: [i32_iday, i64_iday]
+  - source: datetime
+    name: add_intervals
+    system_metadata: { name: "+", notation: INFIX }
+    supported_impls: [iday_iday]
+  - source: datetime
+    name: lt
+    system_metadata: { name: "<", notation: INFIX }
+    supported_impls: [pts_pts, ptstz_ptstz, iday_iday]
+  - source: datetime
+    name: lte
+    system_metadata: { name: "<=", notation: INFIX }
+    supported_impls: [pts_pts, ptstz_ptstz, iday_iday]
+  - source: datetime
+    name: gt
+    system_metadata: { name: ">", notation: INFIX }
+    supported_impls: [pts_pts, ptstz_ptstz, iday_iday]
+  - source: datetime
+    name: gte
+    system_metadata: { name: ">=", notation: INFIX }
+    supported_impls: [pts_pts, ptstz_ptstz, iday_iday]
+
+  # ── functions_rounding ────────────────────────────────────────────
+  - source: rounding
+    name: ceil
+    system_metadata: { name: ceiling }
+    supported_impls: [fp64]
+  - source: rounding
+    name: floor
+    system_metadata: { name: floor }
+    supported_impls: [fp64]
+  - source: rounding
+    name: round
+    metadata:
+      note: Observed - ties round away from zero (2.5 to 3, -2.5 to -3, 0.125 to 0.13).
+    system_metadata: { name: round }
+    required_options:
+      rounding: TIE_AWAY_FROM_ZERO
+    supported_impls: [i32_i32, i64_i32, fp64_i32]
+
+  # ── functions_logarithmic ─────────────────────────────────────────
+  - source: logarithmic
+    name: ln
+    system_metadata: { name: log }
+    required_options:
+      on_domain_error: "NULL"
+      on_log_zero: MINUS_INFINITY
+    supported_impls: [i64, fp64]
+  - source: logarithmic
+    name: log10
+    system_metadata: { name: log10 }
+    required_options:
+      on_domain_error: "NULL"
+      on_log_zero: MINUS_INFINITY
+    supported_impls: [i64, fp64]
+  - source: logarithmic
+    name: log2
+    system_metadata: { name: log2 }
+    required_options:
+      on_domain_error: "NULL"
+      on_log_zero: MINUS_INFINITY
+    supported_impls: [i64, fp64]
+
+# ════════════════════════════════════════════════════════════════════
+# Aggregate functions
+# ════════════════════════════════════════════════════════════════════
+# Kusto's sum, avg, min and max return 0, NaN or a default over no values;
+# the translation returns null in that case, as Substrait specifies.
+
+supported_aggregate_functions:
+  - source: arithmetic
+    name: sum
+    system_metadata: { name: sum }
+    supported_impls: [i32, i64, fp64]
+  - source: arithmetic
+    name: sum0
+    system_metadata: { name: sum }
+    supported_impls: [i32, i64, fp64]
+  - source: arithmetic
+    name: avg
+    system_metadata: { name: avg }
+    supported_impls: [fp64]
+  - source: arithmetic
+    name: min
+    system_metadata: { name: min }
+    supported_impls: [i32, i64, fp64]
+  - source: arithmetic
+    name: max
+    system_metadata: { name: max }
+    supported_impls: [i32, i64, fp64]
+  - source: arithmetic
+    name: std_dev
+    metadata:
+      note: SAMPLE maps to stdev(), POPULATION to stdevp().
+    system_metadata: { name: stdev }
+    supported_impls: [req_fp64]
+  - source: arithmetic
+    name: std_dev
+    system_metadata: { name: stdev }
+    required_options:
+      distribution: SAMPLE
+    supported_impls: [fp64]
+  - source: arithmetic
+    name: std_dev
+    system_metadata: { name: stdevp }
+    required_options:
+      distribution: POPULATION
+    supported_impls: [fp64]
+  - source: arithmetic
+    name: variance
+    metadata:
+      note: SAMPLE maps to variance(), POPULATION to variancep().
+    system_metadata: { name: variance }
+    supported_impls: [req_fp64]
+  - source: arithmetic
+    name: variance
+    system_metadata: { name: variance }
+    required_options:
+      distribution: SAMPLE
+    supported_impls: [fp64]
+  - source: arithmetic
+    name: variance
+    system_metadata: { name: variancep }
+    required_options:
+      distribution: POPULATION
+    supported_impls: [fp64]
+  - source: arithmetic
+    name: median
+    metadata:
+      kusto_constraints:
+        - "Only the APPROXIMATE enumeration value is supported (percentile() is an estimate)."
+    system_metadata: { name: percentile }
+    supported_impls: [req_fp64]
+  - source: datetime
+    name: min
+    system_metadata: { name: min }
+    supported_impls: [pts, ptstz, iday]
+  - source: datetime
+    name: max
+    system_metadata: { name: max }
+    supported_impls: [pts, ptstz, iday]
+  - source: aggregate_generic
+    name: count
+    metadata:
+      note: count(x) is translated to countif(isnotnull(x)); count(DISTINCT x) to count_distinctif().
+    system_metadata: { name: count }
+    supported_impls: [any, ""]
+  - source: aggregate_generic
+    name: any_value
+    system_metadata: { name: take_any }
+    supported_impls: [any]
+  - source: aggregate_approx
+    name: approx_count_distinct
+    system_metadata: { name: dcount }
+    supported_impls: [any]

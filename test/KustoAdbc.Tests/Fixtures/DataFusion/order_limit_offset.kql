@@ -1,0 +1,8 @@
+['orders']
+| project ['id'], ['name'] = tostring(['name']), ['price'] = toreal(['price'])
+| sort by ['price'] asc nulls last, ['name'] desc nulls first
+| take 15
+| serialize _rn0 = row_number()
+| where _rn0 > 10
+| take 5
+| project ['id'], ['name']

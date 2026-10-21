@@ -1,0 +1,4 @@
+['orders']
+| project ['price'] = toreal(['price']), ['qty']
+| summarize _a0 = iif(countif(isnotnull(['price']) and ((['qty'] > int(1)))) < 1, real(null), sumif(['price'], (['qty'] > int(1))))
+| project ['s'] = _a0

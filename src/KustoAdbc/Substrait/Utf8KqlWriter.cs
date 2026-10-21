@@ -9,10 +9,9 @@ using System.Text;
 namespace KustoAdbc.Substrait
 {
     /// <summary>
-    /// A growable UTF-8 byte buffer optimized for building KQL query strings.
-    /// All KQL operators are pre-encoded as UTF-8 byte constants. Numeric values
-    /// are formatted directly to UTF-8 via Utf8Formatter. No intermediate .NET
-    /// strings are allocated during query construction.
+    /// A growable UTF-8 byte buffer for building KQL query text. Numeric values
+    /// are formatted directly to UTF-8 via Utf8Formatter; identifiers and string
+    /// literals are escaped as they are written.
     /// </summary>
     public sealed class Utf8KqlWriter
     {
@@ -100,72 +99,76 @@ namespace KustoAdbc.Substrait
             _length += bytesWritten;
         }
 
-        /// <summary>Writes a KQL-escaped string literal: 'value'</summary>
-        public void WriteKqlStringLiteral(ReadOnlySpan<byte> utf8Value)
+        /// <summary>Appends text, encoded as UTF-8.</summary>
+        public void Write(string text)
+        {
+            int max = Encoding.UTF8.GetMaxByteCount(text.Length);
+            EnsureCapacity(_length + max);
+            _length += Encoding.UTF8.GetBytes(text, 0, text.Length, _buffer, _length);
+        }
+
+        /// <summary>Writes a KQL string literal: 'value', with backslash escapes.</summary>
+        public void WriteStringLiteral(string value)
         {
             Write((byte)'\'');
-            // Scan for single quotes that need escaping
-            int start = 0;
-            for (int i = 0; i < utf8Value.Length; i++)
+            WriteEscaped(value);
+            Write((byte)'\'');
+        }
+
+        /// <summary>
+        /// Writes a column or table name, bracket-quoted (['name']). KQL reserves many words
+        /// (operators, type names, options such as 'title' or 'flags') with no published list, so
+        /// names are always quoted, except the translator's own generated names (_e0, _rn3, ...).
+        /// </summary>
+        public void WriteIdentifier(string name)
+        {
+            if (IsGeneratedName(name))
             {
-                if (utf8Value[i] == (byte)'\'')
-                {
-                    if (i > start) Write(utf8Value.Slice(start, i - start));
-                    Write(BackslashQuote);
-                    start = i + 1;
-                }
+                Write(name);
+                return;
             }
-            if (start < utf8Value.Length)
-                Write(utf8Value.Slice(start));
-            Write((byte)'\'');
+            Write((byte)'[');
+            WriteStringLiteral(name);
+            Write((byte)']');
         }
 
-        /// <summary>Writes $field{index} as a field reference.</summary>
-        public void WriteFieldRef(int index)
+        /// <summary>True for names of the form _&lt;lowercase letters&gt;&lt;digits&gt;, which KQL never reserves.</summary>
+        internal static bool IsGeneratedName(string name)
         {
-            Write(FieldPrefix);
-            WriteInt32(index);
+            int i = 1;
+            if (name.Length < 3 || name[0] != '_')
+                return false;
+            while (i < name.Length && name[i] >= 'a' && name[i] <= 'z') i++;
+            if (i == 1 || i == name.Length)
+                return false;
+            while (i < name.Length && name[i] >= '0' && name[i] <= '9') i++;
+            return i == name.Length;
         }
 
-        // ── Pre-encoded KQL operator constants ─────────────────────────
-
-        // All KQL keywords are pure ASCII, so encoding is identity.
-        // Using static readonly byte[] for netstandard2.0 compat;
-        // on net8.0+ these could be ReadOnlySpan<byte> via "..."u8.
-
-        internal static readonly byte[] PipeWhere = "\n| where "u8.ToArray();
-        internal static readonly byte[] PipeProject = "\n| project "u8.ToArray();
-        internal static readonly byte[] PipeTake = "\n| take "u8.ToArray();
-        internal static readonly byte[] PipeSortBy = "\n| sort by "u8.ToArray();
-        internal static readonly byte[] PipeSummarize = "\n| summarize "u8.ToArray();
-        internal static readonly byte[] PipeSerialize = "\n| serialize"u8.ToArray();
-        internal static readonly byte[] PipeJoinKind = "\n| join kind="u8.ToArray();
-        internal static readonly byte[] SummarizeBy = " by "u8.ToArray();
-        internal static readonly byte[] JoinOn = " on "u8.ToArray();
-        internal static readonly byte[] WhereRowNumber = "\n| where row_number() > "u8.ToArray();
-        internal static readonly byte[] Comma = ", "u8.ToArray();
-        internal static readonly byte[] Asc = " asc"u8.ToArray();
-        internal static readonly byte[] Desc = " desc"u8.ToArray();
-        internal static readonly byte[] True = "true"u8.ToArray();
-        internal static readonly byte[] False = "false"u8.ToArray();
-        internal static readonly byte[] DynamicNull = "dynamic(null)"u8.ToArray();
-        internal static readonly byte[] FieldPrefix = "$field"u8.ToArray();
-        internal static readonly byte[] BackslashQuote = "\\'"u8.ToArray();
-        internal static readonly byte[] FuncPrefix = "func_"u8.ToArray();
-        internal static readonly byte[] Iif = "iif("u8.ToArray();
-        internal static readonly byte[] UnknownExpr = "/* unknown expression */"u8.ToArray();
-        internal static readonly byte[] UnknownField = "/* unknown field */"u8.ToArray();
-        internal static readonly byte[] UnknownArg = "/* unknown arg */"u8.ToArray();
-        internal static readonly byte[] CountFunc = "count()"u8.ToArray();
-        internal static readonly byte[] OpenParen = "("u8.ToArray();
-        internal static readonly byte[] CloseParen = ")"u8.ToArray();
-
-        internal static readonly byte[] JoinInner = "inner"u8.ToArray();
-        internal static readonly byte[] JoinFullOuter = "fullouter"u8.ToArray();
-        internal static readonly byte[] JoinLeftOuter = "leftouter"u8.ToArray();
-        internal static readonly byte[] JoinRightOuter = "rightouter"u8.ToArray();
-        internal static readonly byte[] JoinLeftSemi = "leftsemi"u8.ToArray();
-        internal static readonly byte[] JoinLeftAnti = "leftanti"u8.ToArray();
+        void WriteEscaped(string value)
+        {
+            int start = 0;
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+                string? escape = c switch
+                {
+                    '\'' => "\\'",
+                    '\\' => "\\\\",
+                    '\n' => "\\n",
+                    '\r' => "\\r",
+                    '\t' => "\\t",
+                    _ => c < 0x20 ? "\\u" + ((int)c).ToString("x4", System.Globalization.CultureInfo.InvariantCulture) : null,
+                };
+                if (escape == null)
+                    continue;
+                if (i > start) Write(value.Substring(start, i - start));
+                Write(escape);
+                start = i + 1;
+            }
+            if (start < value.Length)
+                Write(start == 0 ? value : value.Substring(start));
+        }
 
         // ── Buffer management ──────────────────────────────────────────
 

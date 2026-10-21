@@ -14,7 +14,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="Substrait\Extensions\kusto_functions.yaml" LogicalName="KustoAdbc.kusto_functions.yaml" />
+    <EmbeddedResource Include="Substrait\Dialect\kusto_dialect.yaml" LogicalName="KustoAdbc.kusto_dialect.yaml" />
   </ItemGroup>
 
   <ItemGroup>

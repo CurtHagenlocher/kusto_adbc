@@ -1,0 +1,7 @@
+['orders']
+| project ['id']
+| extend _k0 = 1
+| join kind=inner (['customers']
+| project ['cname'] = tostring(['cname'])
+| extend _k1 = 1) on $left._k0 == $right._k1
+| project ['id'], ['cname']

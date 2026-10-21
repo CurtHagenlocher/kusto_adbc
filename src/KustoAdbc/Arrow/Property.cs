@@ -219,9 +219,14 @@ namespace KustoAdbc.Arrow
     {
         static readonly DateTimeOffset UnixEpoch = new DateTimeOffset(1970, 1, 1, 0, 0, 0, TimeSpan.Zero);
 
+        // Kusto datetimes are UTC with 100ns ticks. Values are stored as microseconds:
+        // nanoseconds would overflow int64 outside 1677-2262, but Kusto allows years 1-9999.
+        // (TimestampType.Default is milliseconds, which doesn't match the stored values.)
+        internal static readonly TimestampType ArrowType = new TimestampType(TimeUnit.Microsecond, "+00:00");
+
         public DateTimeOffsetProperty(string name) : base(name) { }
 
-        public override IArrowType Type => TimestampType.Default;
+        public override IArrowType Type => ArrowType;
 
         public override IArrowArrayBuilder CreateBuilder(int? sizeEstimate = null)
             => new PrimitiveBuilder<long>(sizeEstimate ?? 8);
@@ -241,7 +246,7 @@ namespace KustoAdbc.Arrow
         public override IArrowArray Build(IArrowArrayBuilder builder)
         {
             var (vb, nb, len, nc) = ((PrimitiveBuilder<long>)builder).Finish();
-            return new TimestampArray(new ArrayData(TimestampType.Default, len, nc, 0, new[] { nb, vb }));
+            return new TimestampArray(new ArrayData(ArrowType, len, nc, 0, new[] { nb, vb }));
         }
     }
 

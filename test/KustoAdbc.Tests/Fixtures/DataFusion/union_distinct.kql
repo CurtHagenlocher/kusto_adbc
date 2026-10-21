@@ -1,0 +1,6 @@
+['orders']
+| project ['name'] = tostring(['name'])
+| union (['customers']
+| project ['cname'] = tostring(['cname'])
+| project ['name'] = ['cname'])
+| summarize by ['name']

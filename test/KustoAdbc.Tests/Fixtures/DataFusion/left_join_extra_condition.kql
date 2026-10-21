@@ -1,0 +1,8 @@
+['orders']
+| project ['id'], ['customer_id']
+| join kind=leftouter (['customers']
+| project ['id'], ['cname'] = tostring(['cname']), ['region'] = tostring(['region'])
+| where (['region'] == 'r')
+| project ['id_0'] = ['id'], ['cname']
+| where isnotnull(['id_0'])) on $left.['customer_id'] == $right.['id_0']
+| project ['id'], ['cname']

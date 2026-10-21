@@ -1,0 +1,1 @@
+ERROR: Unsupported Substrait function 'character_length' has no KQL equivalent. Use KustoCapabilities.GetDialectYaml() to discover supported functions.
